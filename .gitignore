@@ -1,0 +1,7 @@
+.env
+data/*.sqlite3
+__pycache__/
+*.pyc
+venv/
+data/config.yaml
+data/*.csv
