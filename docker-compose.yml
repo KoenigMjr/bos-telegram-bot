@@ -1,0 +1,40 @@
+# BOS-Telegram-Bot - die einzige vorgesehene Installation.
+# Einfach diese Datei verwenden (z.B. in Portainer als Stack einfügen) und die
+# Variablen unten setzen. Es wird nichts gebaut: das Image kommt fertig von GitHub.
+services:
+  bos-telegram-bot:
+    # Immer der aktuelle Stand. Feste Version: statt :latest z.B. :1.0.0
+    image: ghcr.io/koenigmjr/bos-telegram-bot:latest
+    pull_policy: always   # Update = Stack neu deployen, zieht automatisch das neue Image
+    container_name: bos-telegram-bot
+    restart: unless-stopped
+    volumes:
+      # Datenordner auf dem Host: Datenbank (Abos, Benutzer) und CSV-Dateien.
+      # Ein normaler Ordner, damit er sich einfach sichern lässt. Pfad nach Bedarf
+      # anpassen (absolut!), Docker legt ihn beim ersten Start an.
+      - /opt/bos-telegram-bot/data:/app/data
+      # Alternative: von Docker verwaltetes Volume statt eigenem Ordner. Dann diese
+      # Zeile statt der obigen verwenden und unten "volumes: bot-data:" aktivieren.
+      # - bot-data:/app/data
+      # Optional, nur für Namens-Suche (/ric, /description):
+      # BOSWatch3-Config-Ordner read-only einbinden (absoluter Pfad auf dem Host)
+      # und unten CSV_PATH_RIC / CSV_PATH_DESCRIPTION darauf zeigen lassen.
+      # - /opt/boswatch3/config:/boswatch3-config:ro
+
+    # In Portainer: Stack -> "Environment variables". Pflichtangaben brechen das
+    # Deployment mit einem Hinweis ab, wenn sie fehlen.
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN fehlt (Token von @BotFather)}
+      ADMIN_USERS: ${ADMIN_USERS:?ADMIN_USERS fehlt (mind. 1 Admin, Telegram-User-ID)}
+      MQTT_HOST: ${MQTT_HOST:?MQTT_HOST fehlt (IP/Hostname des MQTT-Brokers)}
+      # Ab hier optional - leer lassen, dann gelten die Standardwerte
+      MQTT_PORT: ${MQTT_PORT:-}
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      MQTT_TOPIC: ${MQTT_TOPIC:-}
+      CSV_PATH_RIC: ${CSV_PATH_RIC:-}
+      CSV_PATH_DESCRIPTION: ${CSV_PATH_DESCRIPTION:-}
+
+# Nur nötig, wenn oben das Docker-Volume "bot-data" statt des Ordners genutzt wird:
+# volumes:
+#   bot-data:

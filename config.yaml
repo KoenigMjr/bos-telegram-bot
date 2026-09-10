@@ -1,0 +1,59 @@
+mqtt:
+  host: "192.168.1.100"   # IP deines MQTT-Brokers
+  port: 1883
+  username: ""            # Leer lassen, falls ohne Authentifizierung
+  password: ""
+  # '+' fängt jedes Fahrzeug-Subtopic ab (z.B. homeassistant/boswatch/alarm/1234567).
+  # Falls dein Setup alles auf ein einziges Topic schreibt, hier die exakte
+  # Topic-Angabe ohne Wildcard eintragen.
+  topic: "homeassistant/boswatch/alarm/+"
+
+# Jedes hier definierte Feld wird automatisch zu einem eigenen Telegram-Befehl.
+# json_key = exakter Schlüssel im MQTT-JSON-Payload von BOSWatch3.
+#
+# mode: lookup   -> durchsucht eine CSV im BOSWatch3-Descriptor-Schema
+#                   (Spalten: for,add,isRegex - exakt das Format von
+#                   module/descriptor.py). csv_path kann direkt auf eine
+#                   bereits von BOSWatch3 gepflegte Datei zeigen (read-only
+#                   mounten!) - keine eigene Datenhaltung nötig.
+#     search_column  -> welche Spalte bei der Eingabe durchsucht wird
+#     target_column  -> welche Spalte als Abo-Ziel gespeichert und beim
+#                       Alarm gegen json_key verglichen wird
+#     display_column -> welche Spalte als lesbarer Name angezeigt wird
+#
+# mode: pattern  -> kein CSV nötig. Das eingegebene Muster (Wildcard/Regex)
+#                   wird direkt gegen den ankommenden Feldwert gematcht.
+#
+# Befehlsname = Feld-Schlüssel hier (wird automatisch auf a-z/0-9/_ normalisiert,
+# Telegram erlaubt keine Großbuchstaben in Befehlen).
+fields:
+  ric:
+    label: "RIC"
+    json_key: "ric"
+    mode: lookup
+    csv_path: "data/descriptions_ric.csv"
+    search_column: for
+    target_column: for
+    display_column: add
+  description:
+    label: "Fahrzeug / Wache"
+    json_key: "description"
+    mode: lookup
+    csv_path: "data/descriptions_ric.csv"   # gleiche Datei wie oben, andere Spalte
+    search_column: add
+    target_column: add
+    display_column: add
+  message:
+    label: "Alarmstichwort"
+    json_key: "message"
+    mode: pattern
+  subric_text:
+    label: "Sub-RIC"
+    json_key: "subricText"
+    mode: pattern
+
+# Reihenfolge/Auswahl der Felder, die in der Alarm-Benachrichtigung angezeigt werden.
+notification_fields: ["description", "message", "ric"]
+
+files:
+  db_path: "data/bot_db.sqlite3"

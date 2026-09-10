@@ -1,0 +1,4 @@
+python-telegram-bot==21.4
+aiomqtt==2.3.0
+PyYAML==6.0.1
+python-dotenv==1.0.1
