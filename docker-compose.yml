@@ -9,7 +9,7 @@ services:
     container_name: bos-telegram-bot
     restart: unless-stopped
     volumes:
-      # Datenordner auf dem Host: Datenbank (Abos, Benutzer) und CSV-Dateien.
+      # Datenordner auf dem Host: Datenbank (Abos, Benutzer), config.yaml und CSV-Dateien.
       # Ein normaler Ordner, damit er sich einfach sichern lässt. Pfad nach Bedarf
       # anpassen (absolut!), Docker legt ihn beim ersten Start an.
       - /opt/bos-telegram-bot/data:/app/data

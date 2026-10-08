@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 data/*.sqlite3
 venv/
+data/config.yaml
+data/*.csv

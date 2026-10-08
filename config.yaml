@@ -1,3 +1,7 @@
+# Vorlage der Standard-Konfiguration. Beim ersten Start kopiert der Bot sie nach
+# data/config.yaml (im eingebundenen Datenordner). Dort anpassen, danach den Bot
+# neu starten. Eine vorhandene data/config.yaml wird nie überschrieben.
+
 mqtt:
   host: "192.168.1.100"   # IP deines MQTT-Brokers
   port: 1883

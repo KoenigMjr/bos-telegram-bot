@@ -70,12 +70,29 @@ Wahrheit:
 2. Die Variablen `CSV_PATH_RIC` und `CSV_PATH_DESCRIPTION` auf die Datei
    setzen, z.B. `/boswatch3-config/descriptions_ric.csv`
 
-### Eigene Felder (fortgeschritten)
+### Konfiguration anpassen (Felder, Befehle)
 
-Welche Felder es gibt (und damit welche Befehle), steht in
-[`config.yaml`](config.yaml) im Image. Für eigene Felder die Datei kopieren,
-anpassen und per `- /pfad/auf/dem/host/config.yaml:/app/config.yaml:ro` unter
-`volumes:` einbinden. Details zu den Feldern weiter unten.
+Welche Felder es gibt und damit welche Befehle (`/ric`, `/message`, ...), steht
+in der `config.yaml`. Beim **ersten Start** legt der Bot sie automatisch im
+Datenordner ab, also standardmäßig unter `/opt/bos-telegram-bot/data/config.yaml`.
+
+1. Datei dort mit einem Editor anpassen.
+2. Bot neu starten (die Config wird nur beim Start gelesen).
+
+Gut zu wissen:
+
+- Der Bot **überschreibt** die Datei nie, auch nicht bei einem Image-Update.
+  Neue Standardwerte künftiger Versionen musst du bei Bedarf selbst aus der
+  [`config.yaml`](config.yaml) im Repo übernehmen.
+- **Zurücksetzen:** Datei löschen und neu starten, dann entsteht wieder die
+  Standard-Config.
+- Fehler in der Datei meldet der Bot beim Start im Log mit der betroffenen
+  Stelle (z.B. `fields.ric: 'display_column' fehlt`) und startet dann nicht.
+- Zugangsdaten (Token, MQTT-Passwort) gehören **nicht** in diese Datei,
+  dafür sind die Umgebungsvariablen des Stacks da. Werte aus Umgebungsvariablen
+  haben immer Vorrang vor der Datei.
+
+Details zu den Feldern weiter unten.
 
 ## Datensicherung
 
@@ -85,6 +102,7 @@ Alles, was der Bot sich merkt, liegt im Datenordner (Standard
 | Datei               | Inhalt                                             |
 |---------------------|-----------------------------------------------------|
 | `bot_db.sqlite3`    | Abos aller Chats sowie freigeschaltete User und Anfragen |
+| `config.yaml`       | deine Konfiguration (Felder, Befehle)                |
 | `*.csv`             | deine Namens-Listen, falls du sie hier abgelegt hast |
 
 Token, Admin-IDs und MQTT-Zugang stehen nicht dort, sie kommen aus den
@@ -130,7 +148,7 @@ Wahrheit.
 
 Ein **Feld** ist ein Wert aus dem MQTT-JSON, den man abonnieren bzw. filtern
 kann (z.B. die RIC, die Beschreibung oder der Alarmtext). Jedes Feld, das in
-`config.yaml` unter `fields:` definiert ist, wird automatisch zu einem
+`config.yaml` (im Datenordner) unter `fields:` definiert ist, wird automatisch zu einem
 eigenen Telegram-Befehl. Neues Feld = Config editieren, kein Python anfassen.
 
 ### Mitgelieferte Felder

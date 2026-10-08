@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import shutil
 
 import yaml
 from dotenv import load_dotenv
@@ -27,6 +28,77 @@ def sanitize_command_name(name: str) -> str:
     return name[:32]
 
 
+# Mitgelieferte Standard-Config (im Image bzw. Repo neben main.py) und der Ort,
+# an dem die bearbeitbare Kopie liegt: im Datenordner, den der Nutzer auf dem
+# Host eingebunden hat.
+BUNDLED_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+DEFAULT_CONFIG_PATH = os.path.join("data", "config.yaml")
+
+
+def resolve_config_path() -> str:
+    """Bestimmt, welche config.yaml verwendet wird.
+
+    - CONFIG_PATH gesetzt: genau diese Datei (muss existieren).
+    - sonst data/config.yaml im Datenordner. Fehlt sie, wird sie beim ersten
+      Start aus der mitgelieferten Standard-Config kopiert. Eine vorhandene
+      Datei wird nie überschrieben, Änderungen des Nutzers bleiben bei
+      Image-Updates erhalten. Geschrieben wird nur im eigenen Datenordner.
+    """
+    explicit = os.getenv("CONFIG_PATH")
+    if explicit:
+        if not os.path.isfile(explicit):
+            raise SystemExit(f"CONFIG_PATH zeigt auf eine nicht vorhandene Datei: {explicit}")
+        return explicit
+
+    if not os.path.isfile(DEFAULT_CONFIG_PATH):
+        os.makedirs(os.path.dirname(DEFAULT_CONFIG_PATH), exist_ok=True)
+        shutil.copyfile(BUNDLED_CONFIG, DEFAULT_CONFIG_PATH)
+        print(f"[Config] Standard-Config angelegt: {DEFAULT_CONFIG_PATH} "
+              f"(dort anpassen, danach den Bot neu starten)")
+    return DEFAULT_CONFIG_PATH
+
+
+def check_config_sections(config, path: str) -> None:
+    if not isinstance(config, dict):
+        raise SystemExit(f"{path}: Datei ist leer oder hat kein gültiges Format.")
+    missing = [s for s in ("mqtt", "fields", "files") if not isinstance(config.get(s), dict)]
+    if missing:
+        raise SystemExit(f"{path}: Abschnitt fehlt oder ist leer: {', '.join(missing)}")
+
+
+def validate_config(config: dict, path: str) -> None:
+    """Prüft die (nach Umgebungsvariablen-Overrides) fertige Config und
+    nennt alle Probleme auf einmal, statt mit einem KeyError abzubrechen."""
+    problems = []
+    if not config["files"].get("db_path"):
+        problems.append("files.db_path fehlt")
+    if not config["mqtt"].get("host"):
+        problems.append("mqtt.host fehlt (oder Umgebungsvariable MQTT_HOST setzen)")
+    if not config["fields"]:
+        problems.append("fields ist leer, es gäbe keine Befehle zum Abonnieren")
+
+    for key, cfg in config["fields"].items():
+        if not isinstance(cfg, dict):
+            problems.append(f"fields.{key}: muss ein Block mit Einträgen sein")
+            continue
+        for req in ("label", "json_key", "mode"):
+            if not cfg.get(req):
+                problems.append(f"fields.{key}: '{req}' fehlt")
+        mode = cfg.get("mode")
+        if mode and mode not in ("lookup", "pattern"):
+            problems.append(f"fields.{key}: mode muss 'lookup' oder 'pattern' sein (ist '{mode}')")
+        if mode == "lookup":
+            for req in ("csv_path", "search_column", "target_column", "display_column"):
+                if not cfg.get(req):
+                    problems.append(f"fields.{key}: '{req}' fehlt (nötig bei mode: lookup)")
+            for col in ("search_column", "target_column", "display_column"):
+                if cfg.get(col) and cfg[col] not in ("for", "add"):
+                    problems.append(f"fields.{key}: {col} muss 'for' oder 'add' sein (ist '{cfg[col]}')")
+
+    if problems:
+        raise SystemExit(f"Fehler in {path}:\n  - " + "\n  - ".join(problems))
+
+
 def load_config() -> dict:
     """Lädt config.yaml (strukturelle Feld-Definitionen, selten geändert)
     und überschreibt deployment-spezifische Werte (Hosts, Pfade, Zugangsdaten)
@@ -39,9 +111,13 @@ def load_config() -> dict:
     CSV-Pfad im Container/Service) niemals config.yaml angefasst werden -
     einfach die Env-Var setzen und neu starten.
     """
-    config_path = os.getenv("CONFIG_PATH") or "config.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    config_path = resolve_config_path()
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise SystemExit(f"{config_path} ist kein gültiges YAML: {e}")
+    check_config_sections(config, config_path)
 
     mqtt = config["mqtt"]
     mqtt["host"] = os.getenv("MQTT_HOST") or mqtt.get("host")
@@ -64,6 +140,7 @@ def load_config() -> dict:
         if override:
             field_cfg["csv_path"] = override
 
+    validate_config(config, config_path)
     return config
 
 
