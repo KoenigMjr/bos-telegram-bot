@@ -2,7 +2,7 @@ import html
 import re
 from functools import wraps
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 import database as db
@@ -107,6 +107,74 @@ def admin_only(func):
     return wrapped
 
 
+# ---------------------------------------------------------------- Rückfrage statt Fehlermeldung
+#
+# Telegram sendet einen Befehl aus dem Menü sofort ohne Eingabe ab. Der Bot antwortet
+# dann mit der Anleitung UND einer Rückfrage (ForceReply): Das Eingabefeld ist auf die
+# Antwort eingestellt, ein Tipp mit der Eingabe führt den Befehl aus, als hätte man ihn
+# mit Eingabe geschrieben. Die Anleitung bleibt vollständig erhalten.
+
+PROMPT_MARKER = "✍️"   # jede Rückfrage beginnt damit, daran erkennt der Bot sie wieder
+PROMPT_HOW = "Einfach auf diese Nachricht antworten oder den Befehl direkt mit Eingabe schreiben:"
+MAX_OPEN_PROMPTS = 10  # pro Person gemerkte, noch unbeantwortete Rückfragen
+
+
+async def _ask(update, context, text: str, placeholder: str, handler_key: tuple) -> None:
+    """Sendet Anleitung plus Rückfrage und merkt sich, welcher Befehl gemeint war."""
+    chat = update.effective_chat
+    in_group = chat.type != "private"
+    options = {
+        "parse_mode": "HTML",
+        # 'selective' zeigt die Rückfrage nur der Person, die den Befehl gesendet hat. Das
+        # greift in Gruppen nur, wenn die Nachricht eine Antwort auf ihren Befehl ist.
+        "reply_markup": ForceReply(selective=in_group, input_field_placeholder=placeholder[:64]),
+    }
+    if in_group:
+        options["do_quote"] = True
+    sent = await update.message.reply_text(text, **options)
+
+    prompts = context.user_data.setdefault("prompts", {})
+    prompts[(chat.id, sent.message_id)] = {"handler": handler_key}
+    while len(prompts) > MAX_OPEN_PROMPTS:
+        prompts.pop(next(iter(prompts)))
+
+
+_PROMPT_INVALID = (
+    "⌛ Diese Eingabeaufforderung ist nicht mehr gültig (z.B. nach einem Neustart oder weil "
+    "sie von jemand anderem stammt). Bitte den Befehl erneut senden."
+)
+
+
+@restricted
+async def _handle_prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt) -> None:
+    if not prompt:
+        return await update.message.reply_text(_PROMPT_INVALID)
+    handler = context.bot_data.get("prompt_handlers", {}).get(prompt["handler"])
+    if handler is None:
+        return await update.message.reply_text("ℹ️ Dieser Befehl ist nicht mehr konfiguriert.")
+    # Die Antwort wird behandelt, als wäre sie hinter den Befehl geschrieben worden.
+    context.args = update.message.text.split()
+    await handler(update, context)
+
+
+async def prompt_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Antworten auf eine Rückfrage des Bots.
+
+    Bewusst ohne @restricted am Anfang: Antworten auf Nachrichten anderer Personen
+    dürfen keine Zugriffsanfrage auslösen. Erst wenn feststeht, dass es die Antwort auf
+    eine Rückfrage des Bots ist, greift die Zugriffsprüfung."""
+    message = update.message
+    replied = message.reply_to_message if message else None
+    if not replied or not replied.from_user or replied.from_user.id != context.bot.id:
+        return
+    if not (replied.text or "").startswith(PROMPT_MARKER):
+        return  # Antwort auf eine andere Bot-Nachricht (Alarm, /abo, ...)
+
+    prompts = context.user_data.get("prompts", {})
+    prompt = prompts.pop((update.effective_chat.id, replied.message_id), None)
+    await _handle_prompt_reply(update, context, prompt)
+
+
 def _db_path(context) -> str:
     return context.bot_data["config"]["files"]["db_path"]
 
@@ -197,6 +265,8 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             lines.append(f"• <code>/{cmd['name']} &lt;Name oder Muster&gt;</code> – {html.escape(entry['add_label'])} suchen")
     lines.append("")
+    lines.append("Ein Befehl ohne Eingabe fragt dich danach. Du kannst die Eingabe auch gleich mitschicken.")
+    lines.append("")
     lines.append("• <code>/abo</code> – Aktive Abonnements anzeigen &amp; verwalten")
     lines.append("• <code>/lastraw</code> – Letztes empfangenes Alarm-JSON anzeigen")
     if update.effective_chat.type != "private":
@@ -249,7 +319,8 @@ async def lastraw_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------------------------------------------------------- Abonnieren
 
-def _for_usage(entry: dict) -> str:
+def _for_prompt(entry: dict):
+    """Anleitung samt Rückfrage für einen Feld-Befehl ohne Eingabe: (Text, Platzhalter)."""
     cmd, label = entry["command"], html.escape(entry["label"])
     if entry["match"] == "exact":
         lines = [
@@ -257,13 +328,16 @@ def _for_usage(entry: dict) -> str:
             f"• <code>/{cmd} Anfang*</code> – beginnt mit …",
             f"• <code>/{cmd} *Teil*</code> – enthält …",
         ]
+        placeholder = "Wert oder Muster, z.B. 301*"
     else:
         lines = [
             f"• <code>/{cmd} Text</code> – enthält Text",
             f"• <code>/{cmd} Anfang*</code> – beginnt mit …",
             f"• <code>/{cmd} re:…</code> – reguläre Ausdrücke",
         ]
-    return f"Bitte Wert oder Muster für <b>{label}</b> angeben:\n" + "\n".join(lines)
+        placeholder = "Text oder Muster, z.B. THL*"
+    text = f"{PROMPT_MARKER} <b>{label}</b>: Wert oder Muster eingeben.\n{PROMPT_HOW}\n" + "\n".join(lines)
+    return text, placeholder
 
 
 def _confirmation(headline: str, alias: str, hints: list, detail: str = "") -> str:
@@ -285,7 +359,8 @@ def make_for_handler(entry: dict):
         chat_id = update.effective_chat.id
 
         if not context.args:
-            return await update.message.reply_text(_for_usage(entry), parse_mode="HTML")
+            text, placeholder = _for_prompt(entry)
+            return await _ask(update, context, text, placeholder, ("for", field))
 
         raw = " ".join(context.args).strip()
         name = None
@@ -375,12 +450,12 @@ def make_add_handler(entry: dict):
         reply = update.message.reply_text
 
         if not context.args:
-            return await reply(
-                f"Bitte Name oder Muster für <b>{html.escape(add_label)}</b> angeben:\n"
+            text = (
+                f"{PROMPT_MARKER} <b>{html.escape(add_label)}</b>: Name oder Muster eingeben.\n{PROMPT_HOW}\n"
                 f"• <code>/{cmd} Name</code> – in der Liste suchen\n"
-                f"• <code>/{cmd} *Teil*</code> – Muster (Platzhalter <code>*</code>)",
-                parse_mode="HTML",
+                f"• <code>/{cmd} *Teil*</code> – Muster (Platzhalter <code>*</code>)"
             )
+            return await _ask(update, context, text, "Name oder Muster, z.B. *wagen*", ("add", for_key))
 
         raw = " ".join(context.args).strip()
         if has_wildcard_syntax(raw):
@@ -413,6 +488,13 @@ def make_add_handler(entry: dict):
 
 # ---------------------------------------------------------------- Abos verwalten
 
+def _with_label(field_label: str, alias: str) -> str:
+    """'Feld: Name' für die Anzeige. Muster-Abos tragen das Feld schon im Namen
+    ('Alarmstichwort: THL*'), dann wird es nicht noch einmal vorangestellt."""
+    prefix = f"{field_label}: "
+    return alias if alias.startswith(prefix) else prefix + alias
+
+
 @restricted
 async def abo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -429,11 +511,9 @@ async def abo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [header]
     keyboard = []
     for sub in subs:
-        field_label = labels.get(sub["field"], sub["field"])
-        lines.append(f"• [{html.escape(field_label)}] {html.escape(sub['alias'])}")
-        keyboard.append(
-            [InlineKeyboardButton(f"🗑️ {field_label}: {sub['alias'][:22]}", callback_data=f"del:{sub['id']}")]
-        )
+        text = _with_label(labels.get(sub["field"], sub["field"]), sub["alias"])
+        lines.append(f"• {html.escape(text)}")
+        keyboard.append([InlineKeyboardButton(f"🗑️ {text}"[:45], callback_data=f"del:{sub['id']}")])
 
     keyboard.append([InlineKeyboardButton("✔️ Alles passt", callback_data="close_menu")])
     await update.message.reply_text(
@@ -555,10 +635,12 @@ async def users_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def adduser_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_path = context.bot_data["config"]["files"]["db_path"]
     if not context.args:
-        return await update.message.reply_text(
-            "Bitte Telegram-ID angeben, z.B. <code>/adduser 123456789 Max Mustermann</code>",
-            parse_mode="HTML",
+        text = (
+            f"{PROMPT_MARKER} <b>Benutzer freischalten</b>: Telegram-ID und optional einen Namen eingeben.\n"
+            f"{PROMPT_HOW}\n"
+            "• <code>/adduser 123456789 Max Mustermann</code>"
         )
+        return await _ask(update, context, text, "ID und optional Name", ("adduser", ""))
     try:
         uid = int(context.args[0])
     except ValueError:

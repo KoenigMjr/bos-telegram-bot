@@ -3,7 +3,7 @@ import os
 
 from dotenv import load_dotenv
 from telegram import BotCommand, BotCommandScopeChat
-from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 import database as db
 import handlers
@@ -108,10 +108,17 @@ def main():
     app.add_handler(CommandHandler("adduser", handlers.adduser_handler))
     app.add_handler(CallbackQueryHandler(handlers.button_handler))
 
+    # Befehle mit Eingabe fragen bei fehlender Eingabe nach (ForceReply). Damit die Antwort
+    # den richtigen Befehl ausführt, merkt sich der Bot zu jeder Rückfrage dessen Handler.
+    prompt_handlers = {("adduser", ""): handlers.adduser_handler}
     for cmd in command_map:
         make = handlers.make_for_handler if cmd["kind"] == "for" else handlers.make_add_handler
-        app.add_handler(CommandHandler(cmd["name"], make(cmd["entry"])))
+        handler = make(cmd["entry"])
+        app.add_handler(CommandHandler(cmd["name"], handler))
+        prompt_handlers[(cmd["kind"], cmd["entry"]["for"])] = handler
         print(f"[Setup] /{cmd['name']} -> Feld '{cmd['entry']['for' if cmd['kind'] == 'for' else 'add']}'")
+    app.bot_data["prompt_handlers"] = prompt_handlers
+    app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, handlers.prompt_reply_handler))
 
     print(f"🤖 BOS-Telegram-Bot gestartet ({len(admins)} Admin(s), {len(command_map)} Feld-Befehle)")
     app.run_polling()

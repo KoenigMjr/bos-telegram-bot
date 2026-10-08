@@ -61,6 +61,37 @@ vorher einrichten.
 | `/lastraw`                     | zuletzt empfangenes Alarm-JSON anzeigen                          |
 | `/users`, `/adduser <ID>`      | nur Admins, siehe [Benutzer und Admins](#benutzer-und-admins)    |
 
+### Befehl ohne Eingabe: der Bot fragt nach
+
+Wählst du einen Befehl im Telegram-Menü, sendet Telegram ihn sofort ab, noch
+bevor du etwas eintippen kannst. Das lässt sich nicht ändern. Deshalb antwortet
+der Bot mit der Anleitung **und** einer Rückfrage: Dein Eingabefeld ist auf die
+Antwort eingestellt und zeigt ein Beispiel als Platzhalter. Du tippst nur noch
+die Eingabe, das wirkt wie `/description Wache`.
+
+```
+Du:   /description
+Bot:  ✍️ Fahrzeug / Wache: Name oder Muster eingeben.
+      Einfach auf diese Nachricht antworten oder den Befehl direkt mit Eingabe schreiben:
+      • /description Name – in der Liste suchen
+      • /description *Teil* – Muster (Platzhalter *)
+Du:   Wache
+Bot:  ✅ Abonniert: …
+```
+
+Die Anleitung bleibt vollständig erhalten und zeigt weiterhin die direkte
+Schreibweise, so lernst du beide Wege kennen. Das gilt für alle Befehle, die
+eine Eingabe brauchen: `/ric`, `/description`, `/message`, `/subrictext`,
+eigene Felder und `/adduser`.
+
+- In **Gruppen** erscheint das Antwortfeld nur bei der Person, die den Befehl
+  gesendet hat. Antworten anderer Personen auf die Rückfrage zählen nicht.
+- Jede Rückfrage lässt sich **einmal** beantworten. Pro Person merkt sich der
+  Bot bis zu zehn offene. Nach einem Neustart sind sie ungültig, dann meldet
+  der Bot das und du sendest den Befehl erneut.
+- Du brauchst dafür **nichts bei BotFather** einzustellen, auch nicht bei
+  aktivem Privacy Mode: Antworten auf Nachrichten des Bots kommen immer an.
+
 ### Wie Eingaben ausgewertet werden
 
 `*` (oder `%`) steht für beliebig viele Zeichen, `?` (oder `_`) für genau eines.
