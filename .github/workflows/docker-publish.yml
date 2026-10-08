@@ -4,6 +4,7 @@
 #   Push auf main      -> Tag :latest
 #   Tag v1.2.3         -> Tags :1.2.3 und :1.2
 #   Manuell (Actions)  -> baut den Stand von main neu
+# Vor jedem Build laufen die Tests (python -m unittest discover -s tests -t .).
 name: Docker Image
 
 on:
@@ -20,6 +21,14 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+
+      # Tests zuerst: Schlägt einer fehl, wird kein Image veröffentlicht.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -t .
 
       # QEMU + Buildx: ein Image für Intel/AMD-Server UND ARM (Raspberry Pi, NAS)
       - uses: docker/setup-qemu-action@v3

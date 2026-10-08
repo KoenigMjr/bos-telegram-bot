@@ -1,62 +1,57 @@
-# Vorlage der Standard-Konfiguration. Beim ersten Start kopiert der Bot sie nach
-# data/config.yaml (im eingebundenen Datenordner). Dort anpassen, danach den Bot
-# neu starten. Eine vorhandene data/config.yaml wird nie überschrieben.
+# Standardkonfiguration. Ist im Image enthalten und wird bei jedem Update erneuert,
+# deshalb hier nichts ändern. Eigene Anpassungen: in data/config.yaml nur die
+# Einträge eintragen, die abweichen sollen (siehe README, "Konfiguration anpassen").
 
 mqtt:
-  host: "192.168.1.100"   # IP deines MQTT-Brokers
+  host: "192.168.1.100"   # per Umgebungsvariable MQTT_HOST setzen
   port: 1883
-  username: ""            # Leer lassen, falls ohne Authentifizierung
+  username: ""
   password: ""
-  # '+' fängt jedes Fahrzeug-Subtopic ab (z.B. homeassistant/boswatch/alarm/1234567).
-  # Falls dein Setup alles auf ein einziges Topic schreibt, hier die exakte
-  # Topic-Angabe ohne Wildcard eintragen.
+  # '+' fängt jedes Fahrzeug-Subtopic ab, z.B. homeassistant/boswatch/alarm/1234567.
+  # Schreibt dein Setup alles auf ein einziges Topic, hier die exakte Angabe eintragen.
   topic: "homeassistant/boswatch/alarm/+"
 
-# Jedes hier definierte Feld wird automatisch zu einem eigenen Telegram-Befehl.
-# json_key = exakter Schlüssel im MQTT-JSON-Payload von BOSWatch3.
+# Jeder Eintrag steht für ein Feld des MQTT-JSON und wird zu einem Telegram-Befehl.
 #
-# mode: lookup   -> durchsucht eine CSV im BOSWatch3-Descriptor-Schema
-#                   (Spalten: for,add,isRegex - exakt das Format von
-#                   module/descriptor.py). csv_path kann direkt auf eine
-#                   bereits von BOSWatch3 gepflegte Datei zeigen (read-only
-#                   mounten!) - keine eigene Datenhaltung nötig.
-#     search_column  -> welche Spalte bei der Eingabe durchsucht wird
-#     target_column  -> welche Spalte als Abo-Ziel gespeichert und beim
-#                       Alarm gegen json_key verglichen wird
-#     display_column -> welche Spalte als lesbarer Name angezeigt wird
+#   for:      Name des JSON-Feldes. Daraus entsteht der Befehl (ric -> /ric).
+#             Alles ist Freieingabe: /ric 1234567, /ric 123*, /message THL*
+#   label:    Anzeigename in Meldungen (Standard: der Feldname)
+#   match:    Verhalten bei Eingabe OHNE Wildcard
+#               exact    -> der Wert muss genau passen
+#               contains -> der Wert muss den Text enthalten (Standard)
+#             Mit Wildcard (* % ? _) gilt immer das Muster. '301*' = beginnt mit 301,
+#             '*301*' = enthält 301. 're:...' nimmt eine Regex.
+#   command:  anderer Befehlsname statt dem Feldnamen (optional)
 #
-# mode: pattern  -> kein CSV nötig. Das eingegebene Muster (Wildcard/Regex)
-#                   wird direkt gegen den ankommenden Feldwert gematcht.
+# Optional, wenn ein Feld einen lesbaren Namen ergänzt (z.B. RIC -> Beschreibung):
+#   add:       Name des ergänzten JSON-Feldes. Daraus entsteht ein zweiter Befehl, der
+#              nach Namen sucht (description -> /description). Ausgewählt wird der Name,
+#              abonniert wird der Wert aus 'for'. Wildcards legen direkt ein Muster an.
+#   add_label: Anzeigename dafür
+#   csv:       CSV im BOSWatch3-Descriptor-Format (for,add,isRegex) mit Namen für die
+#              Suche, nur lesend. Ohne Angabe wird data/descriptions_<for>.csv genutzt,
+#              falls vorhanden. Per Umgebungsvariable: CSV_PATH_<FELD>, z.B. CSV_PATH_RIC.
+#   learn:     Paare (for -> add) aus Alarmen merken und in die Suche aufnehmen
+#              (Standard: true)
 #
-# Befehlsname = Feld-Schlüssel hier (wird automatisch auf a-z/0-9/_ normalisiert,
-# Telegram erlaubt keine Großbuchstaben in Befehlen).
+# Eigene Änderungen (data/config.yaml) werden über 'for' zugeordnet: gleiches 'for'
+# ergänzt oder ändert diesen Eintrag, ein neues 'for' hängt einen Eintrag an,
+# 'remove: true' entfernt einen Eintrag.
 fields:
-  ric:
+  - for: ric
     label: "RIC"
-    json_key: "ric"
-    mode: lookup
-    csv_path: "data/descriptions_ric.csv"
-    search_column: for
-    target_column: for
-    display_column: add
-  description:
-    label: "Fahrzeug / Wache"
-    json_key: "description"
-    mode: lookup
-    csv_path: "data/descriptions_ric.csv"   # gleiche Datei wie oben, andere Spalte
-    search_column: add
-    target_column: add
-    display_column: add
-  message:
-    label: "Alarmstichwort"
-    json_key: "message"
-    mode: pattern
-  subric_text:
-    label: "Sub-RIC"
-    json_key: "subricText"
-    mode: pattern
+    match: exact
+    add: description
+    add_label: "Fahrzeug / Wache"
 
-# Reihenfolge/Auswahl der Felder, die in der Alarm-Benachrichtigung angezeigt werden.
+  - for: message
+    label: "Alarmstichwort"
+
+  - for: subricText
+    label: "Sub-RIC"
+    match: exact
+
+# Welche Felder in der Alarm-Nachricht angezeigt werden (in dieser Reihenfolge).
 notification_fields: ["description", "message", "ric"]
 
 files:

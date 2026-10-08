@@ -1,0 +1,19 @@
+# Beispiel für eine eigene data/config.yaml. Sie enthält NUR Abweichungen von der
+# mitgelieferten Standardkonfiguration (siehe config.yaml im Repo für alle Optionen).
+# Alles, was hier nicht steht, gilt unverändert weiter.
+
+fields:
+  # RIC: CSV von BOSWatch3 verwenden (gleiches 'for' ergänzt den Standardeintrag)
+  - for: ric
+    csv: /boswatch3-config/descriptions_ric.csv
+
+  # Ein vom BOSWatch3-Modul 'descriptor' ergänztes Feld als eigener Befehl (/stadtteil)
+  - for: stadtteil
+    label: "Stadtteil"
+
+  # Ein Standardfeld nicht anbieten
+  - for: subricText
+    remove: true
+
+# Alarm-Nachricht ohne die RIC (ersetzt die Standardliste komplett)
+notification_fields: ["description", "message"]

@@ -1,6 +1,6 @@
 # BOS-Telegram-Bot - die einzige vorgesehene Installation.
-# Einfach diese Datei verwenden (z.B. in Portainer als Stack einfügen) und die
-# Variablen unten setzen. Es wird nichts gebaut: das Image kommt fertig von GitHub.
+# Diese Datei verwenden (z.B. in Portainer als Stack einfügen) und die Variablen
+# unten setzen. Es wird nichts gebaut: das Image kommt fertig von GitHub.
 services:
   bos-telegram-bot:
     # Immer der aktuelle Stand. Feste Version: statt :latest z.B. :1.0.0
@@ -9,16 +9,17 @@ services:
     container_name: bos-telegram-bot
     restart: unless-stopped
     volumes:
-      # Datenordner auf dem Host: Datenbank (Abos, Benutzer), config.yaml und CSV-Dateien.
+      # Datenordner auf dem Host: Datenbank (Abos, Benutzer, gelernte Namen) sowie
+      # optional eine eigene config.yaml und eine CSV (descriptions_ric.csv).
       # Ein normaler Ordner, damit er sich einfach sichern lässt. Pfad nach Bedarf
       # anpassen (absolut!), Docker legt ihn beim ersten Start an.
       - /opt/bos-telegram-bot/data:/app/data
       # Alternative: von Docker verwaltetes Volume statt eigenem Ordner. Dann diese
       # Zeile statt der obigen verwenden und unten "volumes: bot-data:" aktivieren.
       # - bot-data:/app/data
-      # Optional, nur für Namens-Suche (/ric, /description):
-      # BOSWatch3-Config-Ordner read-only einbinden (absoluter Pfad auf dem Host)
-      # und unten CSV_PATH_RIC / CSV_PATH_DESCRIPTION darauf zeigen lassen.
+      # Optional: BOSWatch3-Config-Ordner read-only einbinden (absoluter Pfad auf dem
+      # Host), damit der Bot dessen CSV direkt liest. Dann unten CSV_PATH_RIC setzen.
+      # Alternativ die CSV einfach als descriptions_ric.csv in den Datenordner legen.
       # - /opt/boswatch3/config:/boswatch3-config:ro
 
     # In Portainer: Stack -> "Environment variables". Pflichtangaben brechen das
@@ -32,8 +33,10 @@ services:
       MQTT_USERNAME: ${MQTT_USERNAME:-}
       MQTT_PASSWORD: ${MQTT_PASSWORD:-}
       MQTT_TOPIC: ${MQTT_TOPIC:-}
+      # Weitere Felder aus dem Alarm als Befehl, z.B. stadtteil,objekt (siehe README)
+      EXTRA_FIELDS: ${EXTRA_FIELDS:-}
+      # Pfad zur CSV mit RIC -> Name (siehe oben), z.B. /boswatch3-config/descriptions_ric.csv
       CSV_PATH_RIC: ${CSV_PATH_RIC:-}
-      CSV_PATH_DESCRIPTION: ${CSV_PATH_DESCRIPTION:-}
 
 # Nur nötig, wenn oben das Docker-Volume "bot-data" statt des Ordners genutzt wird:
 # volumes:

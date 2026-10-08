@@ -1,105 +1,15 @@
-import csv
 import html
-import os
 import re
 from functools import wraps
-from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import ForceReply, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 import database as db
+import knowledge
+from matching import candidate_values, has_wildcard_syntax, match_sub, wildcard_to_regex
 
 ITEMS_PER_PAGE = 5
-
-# Alles unterhalb dieses Ordners "gehört" dem Bot - nur dort dürfen fehlende
-# CSVs automatisch angelegt werden. Alles außerhalb (z.B. ein reingemountetes
-# BOSWatch3-Verzeichnis) wird ausschließlich gelesen, niemals beschrieben.
-OWN_DATA_DIR = Path("data").resolve()
-
-
-def ensure_csv_exists(csv_path: str) -> None:
-    """Legt eine fehlende CSV im BOSWatch3-Descriptor-Schema NUR an, wenn der
-    Pfad innerhalb des eigenen data/-Ordners liegt. Zeigt csv_path auf einen
-    fremden Ordner (z.B. ein gemountetes BOSWatch3-Verzeichnis) und existiert
-    die Datei dort nicht, wird NICHTS geschrieben - nur eine Warnung geloggt."""
-    resolved = Path(csv_path).resolve()
-    if resolved.exists():
-        return
-
-    if OWN_DATA_DIR == resolved.parent or OWN_DATA_DIR in resolved.parents:
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        with open(resolved, "w", encoding="utf-8", newline="") as f:
-            f.write("for,add,isRegex\n")
-        print(f"[CSV] Neu angelegt (eigener Ordner): {resolved}")
-    else:
-        print(
-            f"[CSV] WARNUNG: '{resolved}' existiert nicht und liegt außerhalb von "
-            f"'{OWN_DATA_DIR}' - wird NICHT automatisch angelegt (kein Schreiben in "
-            f"fremde Programmordner). Das betroffene Feld liefert bis dahin keine Treffer."
-        )
-
-
-def load_csv(csv_path: str):
-    """Lädt eine CSV im BOSWatch3-Descriptor-Schema (for,add,isRegex).
-    Parsing bewusst identisch zu module/descriptor.py in BW3-Core gehalten,
-    damit dieselbe Datei ohne Anpassung von beiden Systemen gelesen werden
-    kann (inkl. Toleranz für fehlende isRegex-Spalte, siehe BW3-Doku)."""
-    if not os.path.isfile(csv_path):
-        print(f"[CSV] Datei nicht gefunden, Feld liefert bis dahin keine Treffer: {csv_path}")
-        return []
-
-    csv_data = []
-    with open(csv_path, "r", encoding="utf-8") as csvfile:
-        reader = csv.DictReader(csvfile)
-        for row_num, row in enumerate(reader, start=2):  # Zeile 1 = Header
-            raw_for = str(row.get("for", "")).strip()
-            clean_for = raw_for.strip().strip('"').strip("'")
-            if not clean_for:
-                continue
-
-            is_regex = (row.get("isRegex") or "false").strip().lower() == "true"
-            if is_regex:
-                try:
-                    re.compile(clean_for)
-                except re.error as e:
-                    print(f"[CSV] {csv_path} Zeile {row_num} übersprungen (ungültiger Regex '{clean_for}'): {e}")
-                    continue
-
-            csv_data.append({
-                "for": clean_for,
-                "add": (row.get("add") or "").strip(),
-                "isRegex": is_regex,
-            })
-    return csv_data
-
-
-def wildcard_to_regex(pattern: str) -> str:
-    """Wandelt ein Glob/SQL-Wildcard-Muster in eine anchored Regex um.
-
-    - '*' und '%'  -> beliebig viele Zeichen
-    - '?' und '_'  -> genau ein Zeichen
-    - 're:'-Präfix -> Rest wird als rohe Regex verwendet (Poweruser, kein
-      automatisches Anchoring - der User steuert ^/$ selbst)
-    - kein Wildcard-Zeichen vorhanden -> implizite Contains-Suche
-      (z.B. '/message THL' matcht jede Nachricht, die 'THL' enthält)
-
-    Wirft re.error, wenn das Ergebnis kein gültiger regulärer Ausdruck ist.
-    """
-    pattern = pattern.strip()
-    if pattern.lower().startswith("re:"):
-        raw = pattern[3:]
-        re.compile(raw)
-        return raw
-
-    has_wildcard = any(ch in pattern for ch in "*%?_")
-    star_token, dot_token = "WCSTARTOKEN", "WCDOTTOKEN"
-    tmp = pattern.replace("*", star_token).replace("%", star_token)
-    tmp = tmp.replace("?", dot_token).replace("_", dot_token)
-    escaped = re.escape(tmp).replace(re.escape(star_token), ".*").replace(re.escape(dot_token), ".")
-    regex = f"^{escaped}$" if has_wildcard else f".*{escaped}.*"
-    re.compile(regex)
-    return regex
 
 
 def is_admin(context, user_id: int) -> bool:
@@ -197,15 +107,165 @@ def admin_only(func):
     return wrapped
 
 
+# ---------------------------------------------------------------- Rückfrage statt Fehlermeldung
+#
+# Telegram sendet einen Befehl aus dem Menü sofort ohne Eingabe ab. Der Bot antwortet
+# dann mit der Anleitung UND einer Rückfrage (ForceReply): Das Eingabefeld ist auf die
+# Antwort eingestellt, ein Tipp mit der Eingabe führt den Befehl aus, als hätte man ihn
+# mit Eingabe geschrieben. Die Anleitung bleibt vollständig erhalten.
+
+PROMPT_MARKER = "✍️"   # jede Rückfrage beginnt damit, daran erkennt der Bot sie wieder
+PROMPT_HOW = "Einfach auf diese Nachricht antworten oder den Befehl direkt mit Eingabe schreiben:"
+MAX_OPEN_PROMPTS = 10  # pro Person gemerkte, noch unbeantwortete Rückfragen
+
+
+async def _ask(update, context, text: str, placeholder: str, handler_key: tuple) -> None:
+    """Sendet Anleitung plus Rückfrage und merkt sich, welcher Befehl gemeint war."""
+    chat = update.effective_chat
+    in_group = chat.type != "private"
+    options = {
+        "parse_mode": "HTML",
+        # 'selective' zeigt die Rückfrage nur der Person, die den Befehl gesendet hat. Das
+        # greift in Gruppen nur, wenn die Nachricht eine Antwort auf ihren Befehl ist.
+        "reply_markup": ForceReply(selective=in_group, input_field_placeholder=placeholder[:64]),
+    }
+    if in_group:
+        options["do_quote"] = True
+    sent = await update.message.reply_text(text, **options)
+
+    prompts = context.user_data.setdefault("prompts", {})
+    prompts[(chat.id, sent.message_id)] = {"handler": handler_key}
+    while len(prompts) > MAX_OPEN_PROMPTS:
+        prompts.pop(next(iter(prompts)))
+
+
+_PROMPT_INVALID = (
+    "⌛ Diese Eingabeaufforderung ist nicht mehr gültig (z.B. nach einem Neustart oder weil "
+    "sie von jemand anderem stammt). Bitte den Befehl erneut senden."
+)
+
+
+@restricted
+async def _handle_prompt_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt) -> None:
+    if not prompt:
+        return await update.message.reply_text(_PROMPT_INVALID)
+    handler = context.bot_data.get("prompt_handlers", {}).get(prompt["handler"])
+    if handler is None:
+        return await update.message.reply_text("ℹ️ Dieser Befehl ist nicht mehr konfiguriert.")
+    # Die Antwort wird behandelt, als wäre sie hinter den Befehl geschrieben worden.
+    context.args = update.message.text.split()
+    await handler(update, context)
+
+
+async def prompt_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Antworten auf eine Rückfrage des Bots.
+
+    Bewusst ohne @restricted am Anfang: Antworten auf Nachrichten anderer Personen
+    dürfen keine Zugriffsanfrage auslösen. Erst wenn feststeht, dass es die Antwort auf
+    eine Rückfrage des Bots ist, greift die Zugriffsprüfung."""
+    message = update.message
+    replied = message.reply_to_message if message else None
+    if not replied or not replied.from_user or replied.from_user.id != context.bot.id:
+        return
+    if not (replied.text or "").startswith(PROMPT_MARKER):
+        return  # Antwort auf eine andere Bot-Nachricht (Alarm, /abo, ...)
+
+    prompts = context.user_data.get("prompts", {})
+    prompt = prompts.pop((update.effective_chat.id, replied.message_id), None)
+    await _handle_prompt_reply(update, context, prompt)
+
+
+def _db_path(context) -> str:
+    return context.bot_data["config"]["files"]["db_path"]
+
+
+def _entry_by_for(context, for_key: str):
+    return next((e for e in context.bot_data["entries"] if e["for"] == for_key), None)
+
+
+def _find_entry(context, field_key: str):
+    """Eintrag und Seite ('for' oder 'add'), zu der ein Feldschlüssel gehört."""
+    for entry in context.bot_data["entries"]:
+        if entry["for"] == field_key:
+            return entry, "for"
+        if entry.get("add") == field_key:
+            return entry, "add"
+    return None, None
+
+
+# ---------------------------------------------------------------- Hinweise gegen Tippfehler
+
+def _known_hint(db_path: str, entry: dict, side: str, target: str, is_regex: bool):
+    """Prüft das Abo gegen alle bekannten Werte (Liste + gelernte Paare)."""
+    rows = knowledge.known_rows(db_path, entry)
+    plain = [r for r in rows if not r["isRegex"]]
+    if not plain:
+        return None  # nichts bekannt, also auch nichts zu vergleichen
+
+    if is_regex:
+        rx = re.compile(target)
+        hits = [r for r in plain if rx.match(r[side])]
+        if hits:
+            n = len(hits)
+            names = ", ".join(html.escape(r["add"]) for r in hits[:3])
+            more = f" (+{n - 3} weitere)" if n > 3 else ""
+            count = "1 bekannten Eintrag" if n == 1 else f"{n} bekannte Einträge"
+            return f"✅ Trifft {count}: {names}{more}"
+        note = " Wache-Muster der Liste werden dabei nicht geprüft." if any(r["isRegex"] for r in rows) else ""
+        return "ℹ️ Dazu ist kein passender Eintrag bekannt (weder in der Liste noch aus bisherigen Alarmen)." + note
+
+    if side == "for":
+        if knowledge.resolve_name(entry, db_path, target):
+            return None
+    elif any(r["add"] == target for r in plain):
+        return None
+    return ("ℹ️ Diesen Wert kenne ich noch nicht (weder aus der Liste noch aus bisherigen Alarmen). "
+            "Prüfe die Schreibweise.")
+
+
+def _last_alarm_hint(context, field_key: str, target: str, is_regex: bool):
+    payload = context.bot_data.get("last_payload")
+    if not payload:
+        return None
+    values, raw_list = candidate_values(payload, field_key)
+    if not values:
+        return "ℹ️ Der letzte Alarm enthält dieses Feld nicht."
+    ok = match_sub({"target": target, "is_regex": is_regex, "alias": ""}, values, raw_list) is not None
+    if ok:
+        return "✅ Passt auf den letzten Alarm."
+    return "ℹ️ Passt nicht auf den letzten Alarm (normal, wenn er etwas anderes betraf)."
+
+
+def check_hints(context, field_key: str, target: str, is_regex: bool) -> list:
+    """Hinweise nach dem Anlegen eines Abos. Das Abo wird in jedem Fall angelegt,
+    die Hinweise sind nur dazu da, Tippfehler aufzudecken."""
+    hints = []
+    entry, side = _find_entry(context, field_key)
+    if entry and entry.get("add"):
+        hints.append(_known_hint(_db_path(context), entry, side, target, is_regex))
+    hints.append(_last_alarm_hint(context, field_key, target, is_regex))
+    return [h for h in hints if h]
+
+
+# ---------------------------------------------------------------- Start, lastraw
+
 @restricted
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lines = ["👋 <b>BOS-Alarm-Bot aktiv!</b>", ""]
-    for field_key, field_cfg in context.bot_data["fields"].items():
-        cmd = context.bot_data["field_commands"][field_key]
-        if field_cfg["mode"] == "lookup":
-            lines.append(f"• <code>/{cmd} &lt;suchbegriff&gt;</code> – {html.escape(field_cfg['label'])} abonnieren")
+    lines = [
+        "👋 <b>BOS-Alarm-Bot aktiv!</b>",
+        "",
+        "Abonniere per Befehl. <code>*</code> ist ein Platzhalter: <code>301*</code> beginnt mit 301, "
+        "<code>*301*</code> enthält 301.",
+        "",
+    ]
+    for cmd in context.bot_data["command_map"]:
+        entry = cmd["entry"]
+        if cmd["kind"] == "for":
+            lines.append(f"• <code>/{cmd['name']} &lt;Wert oder Muster&gt;</code> – {html.escape(entry['label'])}")
         else:
-            lines.append(f"• <code>/{cmd} &lt;muster&gt;</code> – {html.escape(field_cfg['label'])} filtern (z.B. THL*)")
+            lines.append(f"• <code>/{cmd['name']} &lt;Name oder Muster&gt;</code> – {html.escape(entry['add_label'])} suchen")
+    lines.append("")
+    lines.append("Ein Befehl ohne Eingabe fragt dich danach. Du kannst die Eingabe auch gleich mitschicken.")
     lines.append("")
     lines.append("• <code>/abo</code> – Aktive Abonnements anzeigen &amp; verwalten")
     lines.append("• <code>/lastraw</code> – Letztes empfangenes Alarm-JSON anzeigen")
@@ -213,6 +273,25 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("")
         lines.append("ℹ️ In dieser Gruppe gesetzte Abos gelten für alle Mitglieder dieser Gruppe.")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+# Technische BOSWatch3-Felder, auf die man nicht abonnieren will. Alles andere im
+# Alarm (z.B. Felder, die das Modul 'descriptor' ergänzt) wird in /lastraw als
+# mögliches neues Feld vorgeschlagen.
+_TECHNICAL_PREFIXES = ("client", "server", "multicast")
+_TECHNICAL_KEYS = {"timestamp", "mode", "bitrate", "inputSource", "frequency", "republished", "subric"}
+
+
+def unconfigured_fields(payload: dict, active_fields: set) -> list:
+    """Felder des Alarms, die weder technisch noch *_list noch bereits als
+    Befehl konfiguriert sind."""
+    return [
+        key for key in payload
+        if not key.endswith("_list")
+        and not key.startswith(_TECHNICAL_PREFIXES)
+        and key not in _TECHNICAL_KEYS
+        and key not in active_fields
+    ]
 
 
 @restricted
@@ -225,163 +304,224 @@ async def lastraw_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = json.dumps(payload, indent=2, ensure_ascii=False)
     if len(text) > 3500:
         text = text[:3500] + "\n… (gekürzt)"
-    await update.message.reply_text(f"<pre>{html.escape(text)}</pre>", parse_mode="HTML")
+    message = f"<pre>{html.escape(text)}</pre>"
+
+    unused = unconfigured_fields(payload, context.bot_data["active_fields"])
+    if unused:
+        message += (
+            "\n\nℹ️ Felder im Alarm, für die es noch keinen Befehl gibt: "
+            f"<code>{html.escape(', '.join(unused))}</code>\n"
+            "Anlegen über die Umgebungsvariable <code>EXTRA_FIELDS</code> "
+            f"(z.B. <code>EXTRA_FIELDS={html.escape(','.join(unused))}</code>)."
+        )
+    await update.message.reply_text(message, parse_mode="HTML")
 
 
-async def send_page(reply_method, field_key, results, page, display_column):
-    start_idx = page * ITEMS_PER_PAGE
-    end_idx = start_idx + ITEMS_PER_PAGE
-    page_items = results[start_idx:end_idx]
+# ---------------------------------------------------------------- Abonnieren
 
-    keyboard = [
-        [InlineKeyboardButton(f"➕ {item[display_column]}", callback_data=f"add:{field_key}:{item['for']}")]
-        for item in page_items
-    ]
-
-    nav_buttons = []
-    if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅️ Zurück", callback_data=f"page:{field_key}:{page-1}"))
-    if end_idx < len(results):
-        nav_buttons.append(InlineKeyboardButton("Weiter ➡️", callback_data=f"page:{field_key}:{page+1}"))
-    if nav_buttons:
-        keyboard.append(nav_buttons)
-
-    text = f"🔍 Treffer {start_idx+1}-{min(end_idx, len(results))} von {len(results)}:"
-    await reply_method(text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-def make_lookup_handler(field_key: str, field_cfg: dict):
-    """Erzeugt einen Handler, der die konfigurierte CSV in search_column
-    durchsucht und bei Auswahl target_column als Abo-Ziel speichert."""
-
-    search_column = field_cfg["search_column"]
-    target_column = field_cfg["target_column"]
-    display_column = field_cfg["display_column"]
-    label = field_cfg["label"]
-
-    @restricted
-    async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        config = context.bot_data["config"]
-        db_path = config["files"]["db_path"]
-        csv_data = context.bot_data["csv_data"].get(field_key, [])
-        chat_id = update.effective_chat.id
-
-        if not context.args:
-            return await update.message.reply_text(
-                f"Bitte Suchbegriff für <b>{html.escape(label)}</b> angeben: "
-                f"<code>/{context.bot_data['field_commands'][field_key]} &lt;Suchbegriff&gt;</code>",
-                parse_mode="HTML",
-            )
-
-        if not csv_data:
-            return await update.message.reply_text(
-                f"❌ Für <b>{html.escape(label)}</b> ist aktuell keine Datenquelle verfügbar "
-                f"(CSV fehlt oder ist leer).",
-                parse_mode="HTML",
-            )
-
-        query = " ".join(context.args).strip()
-
-        # 1. Direkt-Eingabe (exakter Wert in der Such-Spalte)
-        exact_match = next((item for item in csv_data if item[search_column].lower() == query.lower()), None)
-        if exact_match:
-            db.add_sub(
-                db_path, chat_id, field_key, exact_match[target_column], exact_match[display_column],
-                exact_match["isRegex"] if target_column == "for" else False,
-            )
-            return await update.message.reply_text(
-                f"✅ Direkt abonniert:\n<b>{html.escape(exact_match[display_column])}</b>",
-                parse_mode="HTML",
-            )
-
-        # 2. Substring-Suche in der Such-Spalte
-        results = [item for item in csv_data if query.lower() in item[search_column].lower()]
-
-        if not results:
-            return await update.message.reply_text(f"❌ Keine Treffer für „{html.escape(query)}“.", parse_mode="HTML")
-
-        # 3. Smart Single-Match
-        if len(results) == 1:
-            item = results[0]
-            db.add_sub(
-                db_path, chat_id, field_key, item[target_column], item[display_column],
-                item["isRegex"] if target_column == "for" else False,
-            )
-            return await update.message.reply_text(
-                f"🎯 Eindeutiger Treffer, automatisch abonniert:\n<b>{html.escape(item[display_column])}</b>",
-                parse_mode="HTML",
-            )
-
-        # 4. Multi-Match-Auswahl
-        context.user_data[f"search_results:{field_key}"] = results
-        await send_page(update.message.reply_text, field_key, results, 0, display_column)
-
-    return handler
+def _for_prompt(entry: dict):
+    """Anleitung samt Rückfrage für einen Feld-Befehl ohne Eingabe: (Text, Platzhalter)."""
+    cmd, label = entry["command"], html.escape(entry["label"])
+    if entry["match"] == "exact":
+        lines = [
+            f"• <code>/{cmd} Wert</code> – genau dieser Wert",
+            f"• <code>/{cmd} Anfang*</code> – beginnt mit …",
+            f"• <code>/{cmd} *Teil*</code> – enthält …",
+        ]
+        placeholder = "Wert oder Muster, z.B. 301*"
+    else:
+        lines = [
+            f"• <code>/{cmd} Text</code> – enthält Text",
+            f"• <code>/{cmd} Anfang*</code> – beginnt mit …",
+            f"• <code>/{cmd} re:…</code> – reguläre Ausdrücke",
+        ]
+        placeholder = "Text oder Muster, z.B. THL*"
+    text = f"{PROMPT_MARKER} <b>{label}</b>: Wert oder Muster eingeben.\n{PROMPT_HOW}\n" + "\n".join(lines)
+    return text, placeholder
 
 
-def make_pattern_handler(field_key: str, field_cfg: dict):
-    """Erzeugt einen Handler für freie Muster-Filter (z.B. /message THL*),
-    ohne CSV-Lookup - matcht direkt gegen den ankommenden Feldwert."""
+def _confirmation(headline: str, alias: str, hints: list, detail: str = "") -> str:
+    text = f"{headline}\n<b>{html.escape(alias)}</b>"
+    if detail:
+        text += f"\n{detail}"
+    if hints:
+        text += "\n\n" + "\n".join(hints)
+    return text
 
-    label = field_cfg["label"]
+
+def make_for_handler(entry: dict):
+    """Befehl für ein Feld (z.B. /ric, /message): Freieingabe als Wert oder Muster."""
+    field, label, match = entry["for"], entry["label"], entry["match"]
 
     @restricted
     async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        config = context.bot_data["config"]
-        db_path = config["files"]["db_path"]
+        db_path = _db_path(context)
         chat_id = update.effective_chat.id
-        cmd = context.bot_data["field_commands"][field_key]
 
         if not context.args:
-            return await update.message.reply_text(
-                f"Bitte Muster für <b>{html.escape(label)}</b> angeben.\n"
-                f"Beispiele: <code>/{cmd} THL*</code>, <code>/{cmd} *Muster*</code>, "
-                f"<code>/{cmd} re:^RD\\s?\\d</code>",
-                parse_mode="HTML",
-            )
+            text, placeholder = _for_prompt(entry)
+            return await _ask(update, context, text, placeholder, ("for", field))
 
-        raw_pattern = " ".join(context.args).strip()
+        raw = " ".join(context.args).strip()
+        name = None
         try:
-            regex = wildcard_to_regex(raw_pattern)
+            if match == "exact" and not has_wildcard_syntax(raw):
+                target, is_regex = raw, False
+                if entry.get("add"):
+                    name = knowledge.resolve_name(entry, db_path, raw)
+                alias = name or f"{label}: {raw}"
+            else:
+                target, is_regex = wildcard_to_regex(raw), True
+                alias = f"{label}: {raw}"
         except re.error as e:
             return await update.message.reply_text(f"❌ Ungültiges Muster: {html.escape(str(e))}")
 
-        alias = f"{label}: {raw_pattern}"
-        db.add_sub(db_path, chat_id, field_key, regex, alias, True)
-        await update.message.reply_text(
-            f"✅ Filter angelegt:\n<b>{html.escape(alias)}</b>", parse_mode="HTML"
-        )
+        db.add_sub(db_path, chat_id, field, target, alias, is_regex)
+        hints = check_hints(context, field, target, is_regex)
+        if name:
+            text = _confirmation("✅ Abonniert:", alias, hints, f"{html.escape(label)}: <code>{html.escape(raw)}</code>")
+        elif is_regex:
+            text = _confirmation("✅ Filter angelegt:", alias, hints)
+        else:
+            text = _confirmation("✅ Abonniert:", alias, hints)
+        await update.message.reply_text(text, parse_mode="HTML")
 
     return handler
+
+
+async def _subscribe_row(reply, context, chat_id: int, entry: dict, row: dict) -> None:
+    """Abonniert den 'for'-Wert (z.B. die RIC) zu einem ausgewählten Namen."""
+    db.add_sub(_db_path(context), chat_id, entry["for"], row["for"], row["add"], row["isRegex"])
+    kind = "Muster" if row["isRegex"] else entry["label"]
+    detail = f"{html.escape(kind)}: <code>{html.escape(row['for'])}</code>"
+    await reply(_confirmation("✅ Abonniert:", row["add"], [], detail), parse_mode="HTML")
+
+
+async def _create_name_pattern(reply, context, chat_id: int, entry: dict, raw: str) -> None:
+    """Legt ein Muster auf das 'add'-Feld an (z.B. alle Beschreibungen mit RTW)."""
+    add_key, add_label = entry["add"], entry["add_label"]
+    try:
+        regex = wildcard_to_regex(raw)
+    except re.error as e:
+        return await reply(f"❌ Ungültiges Muster: {html.escape(str(e))}")
+    alias = f"{add_label}: {raw}"
+    db.add_sub(_db_path(context), chat_id, add_key, regex, alias, True)
+    hints = check_hints(context, add_key, regex, True)
+    await reply(_confirmation("✅ Filter angelegt:", alias, hints), parse_mode="HTML")
+
+
+def _pattern_button(entry: dict, text: str) -> list:
+    return [InlineKeyboardButton(text, callback_data=f"pat:{entry['for']}")]
+
+
+async def send_page(reply, for_key: str, results: list, page: int, term: str = ""):
+    start_idx = page * ITEMS_PER_PAGE
+    end_idx = start_idx + ITEMS_PER_PAGE
+
+    keyboard = [
+        [InlineKeyboardButton(f"➕ {row['add']}"[:60], callback_data=f"add:{for_key}:{start_idx + i}")]
+        for i, row in enumerate(results[start_idx:end_idx])
+    ]
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Zurück", callback_data=f"page:{for_key}:{page-1}"))
+    if end_idx < len(results):
+        nav.append(InlineKeyboardButton("Weiter ➡️", callback_data=f"page:{for_key}:{page+1}"))
+    if nav:
+        keyboard.append(nav)
+    if term:
+        keyboard.append([InlineKeyboardButton(f"🔎 Alle mit „{term[:25]}“ als Muster", callback_data=f"pat:{for_key}")])
+
+    text = f"🔍 Treffer {start_idx+1}-{min(end_idx, len(results))} von {len(results)}:"
+    await reply(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+def make_add_handler(entry: dict):
+    """Befehl für die Namenssuche (z.B. /description): sucht in der Liste und den
+    gelernten Namen und abonniert den zugehörigen 'for'-Wert. Mit Wildcard wird
+    direkt ein Muster auf den Namen angelegt."""
+    for_key, add_label, cmd = entry["for"], entry["add_label"], entry["add_command"]
+
+    @restricted
+    async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        db_path = _db_path(context)
+        chat_id = update.effective_chat.id
+        reply = update.message.reply_text
+
+        if not context.args:
+            text = (
+                f"{PROMPT_MARKER} <b>{html.escape(add_label)}</b>: Name oder Muster eingeben.\n{PROMPT_HOW}\n"
+                f"• <code>/{cmd} Name</code> – in der Liste suchen\n"
+                f"• <code>/{cmd} *Teil*</code> – Muster (Platzhalter <code>*</code>)"
+            )
+            return await _ask(update, context, text, "Name oder Muster, z.B. *wagen*", ("add", for_key))
+
+        raw = " ".join(context.args).strip()
+        if has_wildcard_syntax(raw):
+            return await _create_name_pattern(reply, context, chat_id, entry, raw)
+
+        rows = knowledge.known_rows(db_path, entry)
+        term = raw.lower()
+        context.user_data[f"term:{for_key}"] = raw
+
+        exact = next((r for r in rows if r["add"].lower() == term), None)
+        if exact:
+            return await _subscribe_row(reply, context, chat_id, entry, exact)
+
+        results = [r for r in rows if term in r["add"].lower()]
+        if not results:
+            hint = "" if rows else "\nDie Liste ist noch leer, sie füllt sich mit den ersten Alarmen."
+            return await reply(
+                f"❌ Keine Treffer für „{html.escape(raw)}“ in der Liste.{hint}",
+                reply_markup=InlineKeyboardMarkup([_pattern_button(entry, "🔎 Trotzdem als Muster anlegen")]),
+                parse_mode="HTML",
+            )
+        if len(results) == 1:
+            return await _subscribe_row(reply, context, chat_id, entry, results[0])
+
+        context.user_data[f"search:{for_key}"] = results
+        await send_page(reply, for_key, results, 0, raw)
+
+    return handler
+
+
+# ---------------------------------------------------------------- Abos verwalten
+
+def _with_label(field_label: str, alias: str) -> str:
+    """'Feld: Name' für die Anzeige. Muster-Abos tragen das Feld schon im Namen
+    ('Alarmstichwort: THL*'), dann wird es nicht noch einmal vorangestellt."""
+    prefix = f"{field_label}: "
+    return alias if alias.startswith(prefix) else prefix + alias
 
 
 @restricted
 async def abo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    config = context.bot_data["config"]
     chat = update.effective_chat
-    subs = db.get_chat_subs(config["files"]["db_path"], chat.id)
+    subs = db.get_chat_subs(_db_path(context), chat.id)
 
     if not subs:
         if chat.type == "private":
             return await update.message.reply_text("Du hast aktuell keine Abonnements.")
         return await update.message.reply_text("Diese Gruppe hat aktuell keine Abonnements.")
 
-    fields_cfg = context.bot_data["fields"]
+    labels = context.bot_data["field_labels"]
     header = "📋 <b>Deine aktiven Abonnements:</b>" if chat.type == "private" \
         else f"📋 <b>Aktive Abonnements dieser Gruppe ({html.escape(chat.title or '')}):</b>"
     lines = [header]
     keyboard = []
     for sub in subs:
-        field_label = fields_cfg.get(sub["field"], {}).get("label", sub["field"])
-        lines.append(f"• [{html.escape(field_label)}] {html.escape(sub['alias'])}")
-        keyboard.append(
-            [InlineKeyboardButton(f"🗑️ {field_label}: {sub['alias'][:22]}", callback_data=f"del:{sub['id']}")]
-        )
+        text = _with_label(labels.get(sub["field"], sub["field"]), sub["alias"])
+        lines.append(f"• {html.escape(text)}")
+        keyboard.append([InlineKeyboardButton(f"🗑️ {text}"[:45], callback_data=f"del:{sub['id']}")])
 
     keyboard.append([InlineKeyboardButton("✔️ Alles passt", callback_data="close_menu")])
     await update.message.reply_text(
         "\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML"
     )
+
+
+_EXPIRED = "⌛ Diese Auswahl ist abgelaufen (z.B. nach einem Neustart). Bitte die Suche erneut ausführen."
 
 
 @restricted
@@ -394,7 +534,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(context, query.from_user.id):
             return await query.answer("⛔ Nur für Admins.", show_alert=True)
         await query.answer()
-        admin_db_path = context.bot_data["config"]["files"]["db_path"]
+        admin_db_path = _db_path(context)
         prefix, action, uid_str = query.data.split(":", 2)
         uid = int(uid_str)
 
@@ -419,43 +559,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
     data = query.data
-    config = context.bot_data["config"]
-    db_path = config["files"]["db_path"]
-    fields_cfg = context.bot_data["fields"]
 
     if data == "close_menu":
         return await query.edit_message_text("👍 Menü geschlossen.")
 
-    if data.startswith("page:"):
-        _, field_key, page_str = data.split(":", 2)
-        page = int(page_str)
-        results = context.user_data.get(f"search_results:{field_key}", [])
-        if results:
-            display_column = fields_cfg[field_key]["display_column"]
-            await send_page(query.edit_message_text, field_key, results, page, display_column)
-        return
-
-    if data.startswith("add:"):
-        _, field_key, item_key = data.split(":", 2)
-        field_cfg = fields_cfg[field_key]
-        csv_data = context.bot_data["csv_data"].get(field_key, [])
-        item = next((i for i in csv_data if i["for"] == item_key), None)
-        if item:
-            target_column = field_cfg["target_column"]
-            display_column = field_cfg["display_column"]
-            db.add_sub(
-                db_path, chat_id, field_key, item[target_column], item[display_column],
-                item["isRegex"] if target_column == "for" else False,
-            )
-            await query.edit_message_text(
-                f"✅ Erfolgreich abonniert:\n<b>{html.escape(item[display_column])}</b>", parse_mode="HTML"
-            )
-        return
-
     if data.startswith("del:"):
         sub_id = int(data.split(":", 1)[1])
-        db.remove_sub_by_id(db_path, chat_id, sub_id)
-        await query.edit_message_text("🗑️ Abonnement entfernt.")
+        db.remove_sub_by_id(_db_path(context), chat_id, sub_id)
+        return await query.edit_message_text("🗑️ Abonnement entfernt.")
+
+    if data.startswith(("page:", "add:", "pat:")):
+        kind, for_key, *rest = data.split(":", 2)
+        entry = _entry_by_for(context, for_key)
+        if not entry or not entry.get("add"):
+            return await query.edit_message_text("ℹ️ Dieses Feld ist nicht mehr konfiguriert.")
+        results = context.user_data.get(f"search:{for_key}", [])
+        term = context.user_data.get(f"term:{for_key}", "")
+
+        if kind == "page":
+            if not results:
+                return await query.edit_message_text(_EXPIRED)
+            return await send_page(query.edit_message_text, for_key, results, int(rest[0]), term)
+
+        if kind == "add":
+            idx = int(rest[0])
+            if idx >= len(results):
+                return await query.edit_message_text(_EXPIRED)
+            return await _subscribe_row(query.edit_message_text, context, chat_id, entry, results[idx])
+
+        # pat: Suchbegriff als Muster auf den Namen anlegen
+        if not term:
+            return await query.edit_message_text(_EXPIRED)
+        return await _create_name_pattern(query.edit_message_text, context, chat_id, entry, term)
 
 
 @restricted
@@ -500,10 +635,12 @@ async def users_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def adduser_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_path = context.bot_data["config"]["files"]["db_path"]
     if not context.args:
-        return await update.message.reply_text(
-            "Bitte Telegram-ID angeben, z.B. <code>/adduser 123456789 Max Mustermann</code>",
-            parse_mode="HTML",
+        text = (
+            f"{PROMPT_MARKER} <b>Benutzer freischalten</b>: Telegram-ID und optional einen Namen eingeben.\n"
+            f"{PROMPT_HOW}\n"
+            "• <code>/adduser 123456789 Max Mustermann</code>"
         )
+        return await _ask(update, context, text, "ID und optional Name", ("adduser", ""))
     try:
         uid = int(context.args[0])
     except ValueError:
