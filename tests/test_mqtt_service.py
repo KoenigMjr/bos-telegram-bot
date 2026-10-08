@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import database as db
 from matching import wildcard_to_regex
@@ -95,7 +96,9 @@ class LearningIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_learning_errors_never_propagate(self):
         env = Env(self)
-        await ms.learn_payload("/gibt/es/nicht/db.sqlite3", env.entries, {"ric": "1", "description": "A"})
+        with patch("builtins.print") as log:
+            await ms.learn_payload("/gibt/es/nicht/db.sqlite3", env.entries, {"ric": "1", "description": "A"})
+        self.assertIn("[Lernen] Fehler", log.call_args[0][0])
 
 
 if __name__ == "__main__":

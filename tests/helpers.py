@@ -1,14 +1,21 @@
 """Gemeinsame Hilfen für die Tests: Fake-Bot, Fake-Updates, Beispiel-Konfiguration."""
+import itertools
 import os
 import tempfile
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
 import database as db
+import handlers
 import settings
+
+BOT_ID = 999
+_message_ids = itertools.count(100)
 
 
 class FakeBot:
+    id = BOT_ID
+
     def __init__(self):
         self.sent = []
 
@@ -56,8 +63,18 @@ class Env:
                     **{e["add"]: e["add_label"] for e in entries if e.get("add")},
                 },
                 "last_payload": None,
+                "prompt_handlers": self._prompt_handlers(entries),
             },
         )
+
+    @staticmethod
+    def _prompt_handlers(entries):
+        """Wie in main.main(): welcher Befehl gehört zu welcher Rückfrage."""
+        result = {("adduser", ""): handlers.adduser_handler}
+        for cmd in settings.build_command_map(entries):
+            make = handlers.make_for_handler if cmd["kind"] == "for" else handlers.make_add_handler
+            result[(cmd["kind"], cmd["entry"]["for"])] = make(cmd["entry"])
+        return result
 
     @property
     def entries(self):
@@ -70,16 +87,23 @@ class Env:
         return db.get_chat_subs(self.db_path, chat_id)
 
 
-def make_update(user_id=1, chat_id=None, chat_type="private", title=None, name="Test User"):
-    """Fake-Update einer Textnachricht. Liefert (update, reply_text-Mock)."""
-    reply = AsyncMock()
+def make_update(user_id=1, chat_id=None, chat_type="private", title=None, name="Test User",
+                text=None, reply_to=None):
+    """Fake-Update einer Textnachricht. Liefert (update, reply_text-Mock).
+    Der Mock gibt eine Nachricht mit eigener message_id zurück, wie Telegram es tut."""
+    reply = AsyncMock(return_value=NS(message_id=next(_message_ids)))
     update = NS(
         effective_user=NS(id=user_id, full_name=name, username="testuser"),
         effective_chat=NS(id=chat_id if chat_id is not None else user_id, type=chat_type, title=title),
-        message=NS(reply_text=reply),
+        message=NS(reply_text=reply, text=text, reply_to_message=reply_to),
         callback_query=None,
     )
     return update, reply
+
+
+def bot_message(text, message_id=1):
+    """Eine Nachricht des Bots, auf die geantwortet wird."""
+    return NS(from_user=NS(id=BOT_ID), text=text, message_id=message_id)
 
 
 def make_callback(data, user_id=1, chat_id=None):

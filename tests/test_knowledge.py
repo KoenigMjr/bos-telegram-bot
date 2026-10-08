@@ -59,9 +59,14 @@ class LoadCsvTests(TempDbCase):
 
     def test_csv_is_never_modified(self):
         path = self.write("for,add,isRegex\n1234567,Name,false\n")
-        before = (os.path.getmtime(path), open(path, encoding="utf-8").read())
+
+        def snapshot():
+            with open(path, encoding="utf-8") as f:
+                return os.path.getmtime(path), f.read()
+
+        before = snapshot()
         knowledge.load_csv(path)
-        self.assertEqual(before, (os.path.getmtime(path), open(path, encoding="utf-8").read()))
+        self.assertEqual(before, snapshot())
 
 
 class ResolveTests(TempDbCase):
