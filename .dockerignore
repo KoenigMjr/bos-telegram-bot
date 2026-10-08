@@ -1,8 +1,12 @@
 .env
 .git
+.github
 __pycache__/
 *.pyc
-data/*.sqlite3
 venv/
-data/config.yaml
+tests/
+examples/
+README.md
+data/*.sqlite3
 data/*.csv
+data/config.yaml

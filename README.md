@@ -3,7 +3,7 @@
 Verteilt Alarme aus [BOSWatch3](https://github.com/KoenigMjr/BW3-Core) per
 Telegram. Der Bot empfängt die Alarme (JSON) über MQTT und benachrichtigt
 Personen oder Gruppen, die ein passendes Kriterium abonniert haben, z.B. eine
-bestimmte RIC, ein Fahrzeug/eine Wache oder ein Stichwort wie `THL*`.
+bestimmte RIC, ein Fahrzeug oder ein Stichwort wie `THL*`.
 
 Gefiltert, dedupliziert und beschrieben wird bereits in BOSWatch3 (u.a. über
 das `descriptor`- und `multicast`-Modul). Der Bot verarbeitet nur das fertige
@@ -30,6 +30,8 @@ die Alarme als JSON sendet.
    | `MQTT_PORT`          | nein    | Standard `1883`                                     |
    | `MQTT_USERNAME`, `MQTT_PASSWORD` | nein | falls der Broker Zugangsdaten verlangt   |
    | `MQTT_TOPIC`         | nein    | Standard `homeassistant/boswatch/alarm/+`           |
+   | `CSV_PATH_RIC`       | nein    | CSV mit RIC → Name, siehe [Namen für RIC und Fahrzeuge](#namen-für-ric-und-fahrzeuge) |
+   | `EXTRA_FIELDS`       | nein    | Weitere Felder aus dem Alarm als Befehl, z.B. `stadtteil,objekt` |
 
 4. **Dem Bot `/start` schreiben.** Fertig.
 
@@ -41,215 +43,97 @@ Datenordner auf dem Host (Standard `/opt/bos-telegram-bot/data`) und bleiben
 erhalten.
 
 Ein erster Test ohne weitere Einrichtung: `/message THL*` schickt dir ab
-jetzt jeden Alarm, dessen Text mit "THL" beginnt.
+jetzt jeden Alarm, dessen Text mit "THL" beginnt. Weitere Personen schaltest du
+direkt im Bot frei, ohne Neustart (siehe [Benutzer und Admins](#benutzer-und-admins)).
 
-Weitere Personen schaltest du später direkt im Bot frei, ohne Neustart
-(siehe [Benutzer und Admins](#benutzer-und-admins)).
+## Befehle und Eingabe
 
-### Namens-Suche für RIC/Fahrzeuge einrichten (optional)
+Jeder Befehl nimmt eine **Freieingabe**. Du musst nichts auswählen und nichts
+vorher einrichten.
 
-Freitext-Filter wie `/message` funktionieren sofort. Für die Suche nach
-Fahrzeug- oder Wachennamen (`/description Muster`) sowie die RIC-Suche
-(`/ric 1234567`) braucht der Bot eine CSV im
-[BOSWatch3-Descriptor-Format](#csv-schema-kompatibel-zu-boswatch3s-descriptor-modul).
+| Befehl                         | Wofür                                                          |
+|--------------------------------|-----------------------------------------------------------------|
+| `/ric <Wert oder Muster>`      | eine RIC (genau) oder mehrere per Muster                        |
+| `/description <Name oder Muster>` | Fahrzeug/Wache nach Namen suchen oder per Muster filtern     |
+| `/message <Text oder Muster>`  | Alarmstichwort filtern                                           |
+| `/subrictext <Wert>`           | Sub-RIC (a bis d)                                                |
+| `/abo`                         | Abos anzeigen und per Klick entfernen                            |
+| `/lastraw`                     | zuletzt empfangenes Alarm-JSON anzeigen                          |
+| `/users`, `/adduser <ID>`      | nur Admins, siehe [Benutzer und Admins](#benutzer-und-admins)    |
 
-**Einfachster Weg:** Die Datei unter dem Namen `descriptions_ric.csv` in den
-Datenordner legen (Standard `/opt/bos-telegram-bot/data/`) und den Bot neu
-starten. Die CSV wird beim Start eingelesen, Änderungen greifen also nach einem
-Neustart. Eine Vorlage liegt in
-[`examples/descriptions_ric.csv`](examples/descriptions_ric.csv). Der Bot liest
-die Datei nur und verändert sie nie.
+### Wie Eingaben ausgewertet werden
 
-**Alternative, wenn BOSWatch3 auf demselben Host läuft:** Statt zu kopieren,
-dessen Ordner read-only einbinden, dann gibt es nur eine Datei als Quelle der
-Wahrheit:
+`*` (oder `%`) steht für beliebig viele Zeichen, `?` (oder `_`) für genau eines.
+Wer ein Muster eingibt, bestimmt selbst, was gelten soll:
 
-1. In der `docker-compose.yml` unter `volumes:` die auskommentierte
-   **BOSWatch3-Zeile** (endet auf `:/boswatch3-config:ro`) aktivieren und den
-   Host-Pfad anpassen, z.B. `/opt/boswatch3/config:/boswatch3-config:ro`
-2. Die Variablen `CSV_PATH_RIC` und `CSV_PATH_DESCRIPTION` auf die Datei
-   setzen, z.B. `/boswatch3-config/descriptions_ric.csv`
+| Eingabe              | Bedeutung                              |
+|----------------------|-----------------------------------------|
+| `/ric 1234567`       | genau diese RIC                         |
+| `/ric 301*`          | alle RICs, die mit 301 **beginnen**     |
+| `/ric *301*`         | alle RICs, die 301 **enthalten**        |
+| `/message THL*`      | Text beginnt mit "THL"                  |
+| `/message THL`       | Text enthält "THL"                      |
+| `/message re:^RD\s?\d` | rohe Regex für Fortgeschrittene     |
 
-### Konfiguration anpassen (Felder, Befehle)
+Ohne Platzhalter gilt bei **RIC und Sub-RIC genau dieser Wert**, bei allen
+anderen Feldern "enthält". `/ric 301` trifft also nicht jede RIC mit 301
+darin, das geht nur mit `*301*`. Welches Feld wie reagiert, legt die Option
+`match` fest (siehe [Konfiguration](#konfiguration-anpassen-optional)).
 
-Welche Felder es gibt und damit welche Befehle (`/ric`, `/message`, ...), steht
-in der `config.yaml`. Beim **ersten Start** legt der Bot sie automatisch im
-Datenordner ab, also standardmäßig unter `/opt/bos-telegram-bot/data/config.yaml`.
+Platzhalter-Muster ignorieren Groß-/Kleinschreibung (`thl*` trifft "THL Tür").
+Rohe `re:`-Ausdrücke gelten genau wie eingegeben.
 
-1. Datei dort mit einem Editor anpassen.
-2. Bot neu starten (die Config wird nur beim Start gelesen).
+### Schutz vor Tippfehlern
 
-Gut zu wissen:
+Nach jedem Anlegen sagt der Bot kurz, was er zu deiner Eingabe weiß. Das Abo
+wird in jedem Fall angelegt, die Hinweise sind nur Information:
 
-- Der Bot **überschreibt** die Datei nie, auch nicht bei einem Image-Update.
-  Neue Standardwerte künftiger Versionen musst du bei Bedarf selbst aus der
-  [`config.yaml`](config.yaml) im Repo übernehmen.
-- **Zurücksetzen:** Datei löschen und neu starten, dann entsteht wieder die
-  Standard-Config.
-- Fehler in der Datei meldet der Bot beim Start im Log mit der betroffenen
-  Stelle (z.B. `fields.ric: 'display_column' fehlt`) und startet dann nicht.
-- Zugangsdaten (Token, MQTT-Passwort) gehören **nicht** in diese Datei,
-  dafür sind die Umgebungsvariablen des Stacks da. Werte aus Umgebungsvariablen
-  haben immer Vorrang vor der Datei.
+- ✅ *Passt auf den letzten Alarm* bzw. ℹ️ *Passt nicht auf den letzten Alarm*
+- ✅ *Trifft 3 bekannte Einträge: …* bzw. ℹ️ *Diesen Wert kenne ich noch nicht*
+  (nur bei Feldern mit Namensliste, und nur wenn schon etwas bekannt ist)
 
-Details zu den Feldern weiter unten.
+## Namen für RIC und Fahrzeuge
 
-## Datensicherung
+Wer seine RIC kennt, tippt sie ein. Wer lieber nach dem Namen sucht, nutzt
+`/description`. Der Bot kennt Namen aus zwei Quellen und fasst sie zusammen:
 
-Alles, was der Bot sich merkt, liegt im Datenordner (Standard
-`/opt/bos-telegram-bot/data`):
+1. **Eine CSV** (optional) im BOSWatch3-Descriptor-Format, die nur gelesen wird.
+2. **Gelernte Namen:** Bei jedem Alarm merkt sich der Bot das Paar RIC und
+   Beschreibung. Bei Multicast-Alarmen kommen alle Paare des Pakets dazu.
 
-| Datei               | Inhalt                                             |
-|---------------------|-----------------------------------------------------|
-| `bot_db.sqlite3`    | Abos aller Chats sowie freigeschaltete User und Anfragen |
-| `config.yaml`       | deine Konfiguration (Felder, Befehle)                |
-| `*.csv`             | deine Namens-Listen, falls du sie hier abgelegt hast |
+So funktioniert die Suche:
 
-Token, Admin-IDs und MQTT-Zugang stehen nicht dort, sie kommen aus den
-Umgebungsvariablen des Stacks und sollten separat notiert sein.
+- `/description Wache` sucht in allen bekannten Namen. Bei genau einem Treffer
+  wird sofort abonniert, sonst erscheinen Buttons.
+- Abonniert wird immer die **RIC** hinter dem Namen (bei Wache-Zeilen das
+  RIC-Muster). Eine spätere Umbenennung des Namens in BOSWatch3 ändert daran
+  nichts. In `/abo` steht trotzdem der Name.
+- Die Auswahl sperrt nichts: Findet die Suche nichts, bietet der Bot
+  **„Trotzdem als Muster anlegen“** an. Bei mehreren Treffern gibt es zusätzlich
+  **„Alle mit … als Muster“**. Mit Platzhalter (`/description *wagen*`) wird
+  direkt ein Muster auf die Beschreibung angelegt.
 
-**Sichern:** den Ordner kopieren. Am sichersten, solange der Bot kurz steht:
+**Gelernte Namen** füllen die Liste ohne Pflege, kennen aber nur, was schon
+einmal alarmiert hat. Ein Name aus der CSV hat bei gleicher RIC Vorrang. Ändert
+BOSWatch3 den Namen einer gelernten RIC, übernimmt der Bot die Änderung. Ein
+Multicast-Paket liefert nur dann Paare, wenn RIC- und Namensliste gleich lang
+sind (ein Name mit „, “ darin würde die Zuordnung verschieben). Abschalten
+lässt sich das Lernen pro Feld mit `learn: false`.
 
-```bash
-docker stop bos-telegram-bot
-cp -a /opt/bos-telegram-bot/data /pfad/zum/backup/data-$(date +%F)
-docker start bos-telegram-bot
-```
+### CSV einbinden
 
-Ohne Stopp geht es im laufenden Betrieb mit dem SQLite-eigenen Backup (so
-bekommst du auch bei gleichzeitigen Schreibzugriffen eine konsistente Kopie):
+Die CSV ist dieselbe Datei, die BOSWatch3 im `descriptor`-Modul benutzt. Der
+Bot liest sie nur und verändert sie nie. Einbinden geht auf zwei Wegen:
 
-```bash
-sqlite3 /opt/bos-telegram-bot/data/bot_db.sqlite3 ".backup '/pfad/zum/backup/bot_db.sqlite3'"
-```
+- **Einfach:** Datei als `descriptions_ric.csv` in den Datenordner legen
+  (Standard `/opt/bos-telegram-bot/data/`) und den Bot neu starten. Sie wird
+  automatisch erkannt. Allgemein gilt `descriptions_<for>.csv`, bei einem Feld
+  `for: ric` also `descriptions_ric.csv`.
+- **Direkt aus BOSWatch3:** Dessen Config-Ordner in der `docker-compose.yml`
+  read-only einbinden (die auskommentierte Zeile unter `volumes:`) und
+  `CSV_PATH_RIC=/boswatch3-config/descriptions_ric.csv` setzen.
 
-**Wiederherstellen:** Container stoppen, Ordner bzw. `bot_db.sqlite3` zurückkopieren,
-Container starten. Ein Update des Images berührt den Datenordner nicht.
-
-## Lesen ja, Schreiben nur im eigenen Ordner
-
-Der Bot **liest** CSV-Dateien von überall, auch aus fremden, read-only
-eingebundenen Verzeichnissen wie dem Config-Ordner von BOSWatch3. Er
-**schreibt** aber niemals in einen Pfad außerhalb seines eigenen
-`data/`-Ordners. Das gilt egal, ob der Pfad in `config.yaml` oder per
-`CSV_PATH_<FELDNAME>` gesetzt wird:
-
-- Liegt die CSV innerhalb von `data/` und fehlt noch, legt der Bot sie beim
-  Start mit leerem Header (`for,add,isRegex`) an.
-- Liegt sie außerhalb (z.B. im eingebundenen BOSWatch3-Ordner) und fehlt dort,
-  passiert **nichts** außer einer Warnung im Log. Das betroffene Feld liefert
-  dann keine Treffer, bis die Datei existiert.
-
-Empfehlung: BOSWatch3s Descriptor-CSV per `:ro`-Volume einbinden, statt eine
-zweite Kopie zu pflegen. Dann gibt es eine Datei als einzige Quelle der
-Wahrheit.
-
-## Felder: Was es gibt und wie sie funktionieren
-
-Ein **Feld** ist ein Wert aus dem MQTT-JSON, den man abonnieren bzw. filtern
-kann (z.B. die RIC, die Beschreibung oder der Alarmtext). Jedes Feld, das in
-`config.yaml` (im Datenordner) unter `fields:` definiert ist, wird automatisch zu einem
-eigenen Telegram-Befehl. Neues Feld = Config editieren, kein Python anfassen.
-
-### Mitgelieferte Felder
-
-| Befehl          | JSON-Schlüssel | Modus     | Wofür                                                        |
-|-----------------|----------------|-----------|---------------------------------------------------------------|
-| `/ric`          | `ric`          | `lookup`  | Einzelne RIC bzw. Fahrzeug/Wache aus der CSV abonnieren       |
-| `/description`  | `description`  | `lookup`  | Dasselbe, aber per Fahrzeug-/Wachenname statt per RIC suchen  |
-| `/message`      | `message`      | `pattern` | Alarmtext filtern, z.B. alle `THL*`- oder `RD*`-Einsätze      |
-| `/subric_text`  | `subricText`   | `pattern` | Sub-RIC-Buchstabe (a/b/c/d) filtern                           |
-
-Diese Auswahl ist nur der Startpunkt. Welche Felder es gibt, bestimmst du in
-`config.yaml`. Als Faustregel taugen Felder, die einen Alarm **inhaltlich**
-beschreiben (`ric`, `description`, `message`, `subricText`, bei Bedarf auch
-`frequency`). Technische Metadaten wie `clientName`, `serverVersion`, `timestamp`
-oder die `*_list`-Felder lohnen sich als Abo-Kriterium meist nicht. Mit
-`/lastraw` siehst du das zuletzt empfangene JSON und damit die exakten
-Feldnamen deines Setups.
-
-### Der Unterschied: `lookup` vs. `pattern`
-
-Beide Modi vergleichen am Ende dasselbe: den Wert des Feldes im ankommenden
-Alarm gegen das, was du abonniert hast. Der Unterschied liegt darin, **woher
-das Abo-Ziel kommt**.
-
-|                          | `mode: lookup` ("Liste")                          | `mode: pattern` ("Freieingabe")                    |
-|--------------------------|----------------------------------------------------|-----------------------------------------------------|
-| Woher kommt das Ziel?    | Aus einer CSV mit bekannten Werten                  | Aus deiner Eingabe, ohne Liste                       |
-| Eingabe                  | Suchbegriff, z.B. `/description Muster`                     | Muster, z.B. `/message THL*`                         |
-| Rückmeldung              | Treffer werden aufgelistet, du wählst per Button    | Muster wird direkt übernommen                        |
-| Tippfehler               | Fallen auf (kein Treffer)                            | Fallen nicht auf, das Abo greift dann nie            |
-| Pflegeaufwand            | CSV muss die Werte enthalten                         | keiner                                                |
-| Passt für                | Endliche, bekannte Mengen (RICs, Fahrzeuge, Wachen)  | Freitext oder Felder ohne gepflegte Liste (Alarmtext) |
-| Vergleich beim Alarm     | Exakt, oder per Regex bei `isRegex=true`-Zeilen      | Immer als Regex (aus deinem Wildcard-Muster erzeugt) |
-
-**`lookup` im Detail** (`/description Muster`):
-
-1. Der Suchbegriff wird in der `search_column` der CSV gesucht
-   (Teilstring, Groß-/Kleinschreibung egal).
-2. Exakter Treffer in dieser Spalte: wird sofort abonniert.
-3. Genau ein Treffer: wird ebenfalls sofort abonniert.
-4. Mehrere Treffer: paginierte Auswahl (5 pro Seite) mit Buttons.
-5. Gespeichert wird der Wert aus `target_column`, angezeigt der aus
-   `display_column`. Dadurch können mehrere Felder **dieselbe** CSV nutzen
-   (`/ric` sucht und matcht in `for`, `/description` in `add`).
-
-**`pattern` im Detail** (`/message THL*`):
-
-1. Dein Muster wird in eine Regex umgewandelt (Syntax siehe
-   "Wildcard-Syntax" weiter unten) und ungültige Muster werden direkt
-   abgelehnt.
-2. Bei jedem Alarm wird der Feldwert (hier `message`) gegen diese Regex
-   geprüft. Es gibt keine CSV und keine Auswahlliste.
-
-**Faustregel:** Gibt es eine feste, überschaubare Menge gültiger Werte, die du
-vorher kennst (Fahrzeuge, RICs)? Dann `lookup`. Ist der Wert Freitext oder
-ändert sich ständig (Einsatzstichwörter)? Dann `pattern`.
-
-> **Hinweis zu `/description`:** Der Vergleich passiert dort exakt gegen den
-> Beschreibungstext im Alarm. Wache-Muster mit `\1`-Platzhaltern (`isRegex=true`
-> in der CSV) lassen sich deshalb nur über `/ric` sinnvoll abonnieren, denn
-> der Platzhalter-Text selbst taucht im Alarm nie wörtlich auf.
-
-### Beispielkonfiguration
-
-```yaml
-fields:
-  ric:
-    label: "RIC"
-    json_key: "ric"          # exakter Schlüssel im MQTT-JSON
-    mode: lookup
-    csv_path: "data/descriptions_ric.csv"   # BOSWatch3-Descriptor-Schema
-    search_column: for        # worin /ric <suchbegriff> sucht
-    target_column: for        # was als Abo-Ziel gespeichert wird
-    display_column: add       # was als Name angezeigt wird
-  description:
-    label: "Fahrzeug / Wache"
-    json_key: "description"
-    mode: lookup
-    csv_path: "data/descriptions_ric.csv"   # dieselbe Datei, andere Spalten
-    search_column: add
-    target_column: add
-    display_column: add
-  message:
-    label: "Alarmstichwort"
-    json_key: "message"
-    mode: pattern              # kein CSV, freies Wildcard-Muster
-```
-
-Pflichtangaben je Modus:
-
-- `lookup`: `label`, `json_key`, `mode`, `csv_path`, `search_column`,
-  `target_column`, `display_column` (Spalten sind `for` oder `add`)
-- `pattern`: `label`, `json_key`, `mode`
-
-Der Befehlsname entspricht dem Feld-Schlüssel (`ric` wird zu `/ric`), wird aber
-automatisch auf `a-z0-9_` normalisiert, da Telegram keine Großbuchstaben in
-Befehlen erlaubt. `subric_text` im Beispiel mappt auf den JSON-Schlüssel
-`subricText`.
-
-## CSV-Schema (kompatibel zu BOSWatch3s `descriptor`-Modul)
+Die CSV wird beim Start eingelesen, Änderungen greifen nach einem Neustart.
 
 ```
 for,add,isRegex
@@ -258,27 +142,110 @@ for,add,isRegex
 ```
 
 - `for`: die RIC oder, bei `isRegex=true`, ein regulärer Ausdruck für mehrere RICs
-- `add`: der Anzeigename (bei Regex-Zeilen optional mit Platzhaltern, siehe unten)
+- `add`: der Name (bei Regex-Zeilen optional mit Platzhaltern, siehe unten)
 - `isRegex`: `true` oder `false`, die Spalte darf bei normalen Zeilen auch fehlen
 
-Eine fertige Vorlage liegt in
-[`examples/descriptions_ric.csv`](examples/descriptions_ric.csv). Alle Namen und
-Nummern in den Beispielen sind frei erfunden.
+Eine Vorlage liegt in [`examples/descriptions_ric.csv`](examples/descriptions_ric.csv).
+Alle Namen und Nummern in den Beispielen sind frei erfunden.
 
-Das Parsing ist bewusst identisch zu `module/descriptor.py` in BW3-Core
-gehalten (inkl. Toleranz für fehlende `isRegex`-Spalte), damit dieselbe Datei
-unverändert von beiden Systemen gelesen werden kann.
+**Platzhalter in Regex-Zeilen:** Bei `isRegex=true` darf der Name Gruppen aus
+dem Muster enthalten (`\1`, `\2`, ...). Der Bot setzt sie ein:
 
-## Wildcard-Syntax bei `mode: pattern`
+```
+for:     ^23456([0-9]{2})$
+add:     Feuerwehr Musterstadt \1
+Alarm-RIC: 2345625
+Anzeige: Feuerwehr Musterstadt 25
+```
 
-| Eingabe        | Bedeutung                                      |
-|----------------|-------------------------------------------------|
-| `THL`          | enthält "THL" (implizite Contains-Suche)        |
-| `THL*`         | beginnt mit "THL"                               |
-| `*THL*`        | enthält "THL" (explizit)                        |
-| `THL%`         | wie `THL*` — `%` und `*` sind gleichbedeutend    |
-| `THL?`         | "THL" + genau ein beliebiges Zeichen             |
-| `re:^RD\s?\d`  | rohe Regex für Power-User, kein Auto-Anchoring   |
+## Konfiguration anpassen (optional)
+
+Der Bot läuft ohne eigene Konfigurationsdatei. Die Standardwerte stecken im
+Image und sind bei jedem Update aktuell: die Befehle `/ric` (mit Namenssuche
+über `/description`), `/message` und `/subrictext`. Anpassen kannst du auf zwei
+Wegen.
+
+**A) Neue Felder per Umgebungsvariable (der einfache Weg)**
+
+```
+EXTRA_FIELDS=stadtteil,objekt
+```
+
+Für jedes genannte Feld aus dem Alarm-JSON entsteht ein Befehl (z.B.
+`/stadtteil Nord*`). Das ist der typische Fall, wenn das BOSWatch3-Modul
+`descriptor` zusätzliche Felder in den Alarm schreibt. Welche Felder es gibt,
+zeigt `/lastraw`: Felder, die im Alarm vorkommen, aber noch keinen Befehl
+haben, werden dort samt fertigem `EXTRA_FIELDS`-Wert aufgelistet. Die
+Schreibweise muss exakt zum JSON passen (Groß-/Kleinschreibung).
+
+**B) Eigene Datei `data/config.yaml` (fortgeschritten)**
+
+Die Datei enthält **nur die Abweichungen** und wird über die Standardwerte
+gelegt. Jeder Eintrag unter `fields:` steht für ein Feld des Alarm-JSON:
+
+```yaml
+fields:
+  - for: ric                        # Feld im JSON, daraus wird /ric
+    csv: /boswatch3-config/descriptions_ric.csv
+  - for: stadtteil                  # neues Feld, daraus wird /stadtteil
+    label: "Stadtteil"
+  - for: subricText
+    remove: true                    # Standardfeld nicht anbieten
+```
+
+| Option        | Bedeutung                                                              |
+|---------------|-------------------------------------------------------------------------|
+| `for`         | Name des JSON-Feldes. Daraus entsteht der Befehl (Pflicht)               |
+| `label`       | Anzeigename in Meldungen (Standard: der Feldname)                        |
+| `match`       | Eingabe ohne Platzhalter: `exact` (genau) oder `contains` (enthält, Standard) |
+| `command`     | anderer Befehlsname statt des Feldnamens                                 |
+| `add`         | zweites Feld, das einen Namen ergänzt (z.B. `description`). Ergibt eine Namenssuche |
+| `add_label`, `add_command` | Anzeigename bzw. Befehlsname dafür                          |
+| `csv`         | CSV mit Namen, siehe [Namen für RIC und Fahrzeuge](#namen-für-ric-und-fahrzeuge) |
+| `learn`       | Namen aus Alarmen merken (Standard `true`)                               |
+| `remove: true`| entfernt einen Standardeintrag                                           |
+
+Wie Einträge zusammengeführt werden:
+
+- Gleiches `for` ändert oder ergänzt den Standardeintrag, alles andere an ihm
+  bleibt erhalten. `null` entfernt eine einzelne Angabe (`add: null`).
+- Ein neues `for` hängt einen Eintrag an. `remove: true` löscht einen.
+- Nur dein `fields:` wird so zusammengeführt. Andere Blöcke wie `mqtt:` werden
+  Wert für Wert überlagert, `notification_fields:` ersetzt die Liste komplett.
+
+Eine Vorlage mit Kommentaren liegt in
+[`examples/config.override.example.yaml`](examples/config.override.example.yaml),
+alle Optionen stehen in der mitgelieferten [`config.yaml`](config.yaml).
+
+- Die Datei wird vom Bot **nie angelegt oder überschrieben**. Nach einer
+  Änderung den Bot neu starten, die Config wird nur beim Start gelesen.
+- Fehler meldet der Bot beim Start im Log mit der betroffenen Stelle (z.B.
+  `fields[for: ric]: match muss 'exact' oder 'contains' sein`) und startet dann
+  nicht.
+- Zugangsdaten (Token, MQTT-Passwort) gehören nicht in diese Datei, dafür sind
+  die Umgebungsvariablen des Stacks da.
+
+Die Reihenfolge, in der Werte gelten (später gewinnt): Standardwerte, deine
+`data/config.yaml`, Umgebungsvariablen.
+
+## Multicast-Alarme
+
+BOSWatch3 kann mehrere Empfänger eines Alarms zu einem Paket zusammenfassen
+(Modul `multicast`). In so einem Paket nennen `ric`, `description` usw. nur
+**einen** der Empfänger, alle stehen in den zugehörigen `*_list`-Feldern,
+kommagetrennt (z.B. `ric_list`). Der Bot berücksichtigt das für **jedes** Feld
+automatisch, ohne Konfiguration:
+
+- Ein Abo löst aus, wenn der Wert im Feld **oder** in der zugehörigen Liste
+  vorkommt. Wer eine Wache abonniert hat, bekommt den Alarm auch, wenn sie nicht
+  der zuletzt genannte Empfänger im Paket ist.
+- Bei mehreren Empfängern zeigt die Nachricht alle Einträge, je einer pro Zeile.
+- Pro Chat kommt **eine** Nachricht, auch wenn mehrere Abos passen. Unten steht
+  "abonniert über: …" mit allen passenden Abos.
+
+Einschränkung: Enthält ein Name selbst ein ", ", teilt die Nachricht ihn auf
+zwei Zeilen auf, weil BOSWatch3 die Liste mit demselben Trennzeichen
+zusammensetzt. Der Abo-Treffer funktioniert trotzdem.
 
 ## Benutzer und Admins
 
@@ -329,7 +296,7 @@ Hinweise:
   des Containers. Das ist beabsichtigt: Die Admin-Liste ist der feste Anker,
   der sich nicht per Chat verändern lässt.
 
-## Mehrere Gruppen mit unterschiedlichen Configs
+## Gruppen mit eigenen Abos
 
 Abos hängen an der **Chat-ID**, nicht an der Person. Ein privater Chat hat
 bei Telegram dieselbe ID wie der jeweilige User (ändert für DMs also nichts),
@@ -354,6 +321,58 @@ dafür nicht geändert werden — Bots sehen Befehle (`/...`) in Gruppen immer,
 unabhängig vom Privacy Mode; der betrifft nur normale Textnachrichten ohne
 Slash-Befehl.
 
+## Datensicherung und was der Bot schreibt
+
+Alles, was der Bot sich merkt, liegt im Datenordner (Standard
+`/opt/bos-telegram-bot/data`):
+
+| Datei               | Inhalt                                                     |
+|---------------------|--------------------------------------------------------------|
+| `bot_db.sqlite3`    | Abos aller Chats, freigeschaltete User und Anfragen, gelernte Namen |
+| `config.yaml`       | deine Anpassungen (nur falls du eine angelegt hast)          |
+| `*.csv`             | deine Namenslisten (nur falls du sie hier abgelegt hast)     |
+
+Token, Admin-IDs und MQTT-Zugang stehen nicht dort, sie kommen aus den
+Umgebungsvariablen des Stacks und sollten separat notiert sein.
+
+Der Bot **schreibt ausschließlich `bot_db.sqlite3`**. CSV-Dateien und die
+Config liest er nur, auch wenn sie aus einem fremden, read-only eingebundenen
+Ordner wie dem von BOSWatch3 stammen.
+
+**Sichern:** den Ordner kopieren. Am sichersten, solange der Bot kurz steht:
+
+```bash
+docker stop bos-telegram-bot
+cp -a /opt/bos-telegram-bot/data /pfad/zum/backup/data-$(date +%F)
+docker start bos-telegram-bot
+```
+
+Ohne Stopp geht es im laufenden Betrieb mit dem SQLite-eigenen Backup (so
+bekommst du auch bei gleichzeitigen Schreibzugriffen eine konsistente Kopie):
+
+```bash
+sqlite3 /opt/bos-telegram-bot/data/bot_db.sqlite3 ".backup '/pfad/zum/backup/bot_db.sqlite3'"
+```
+
+**Wiederherstellen:** Container stoppen, Ordner bzw. `bot_db.sqlite3` zurückkopieren,
+Container starten. Ein Update des Images berührt den Datenordner nicht.
+
+## Update von einer früheren Version
+
+- **Alte `data/config.yaml`:** Frühere Versionen haben `fields:` als Zuordnung
+  mit `mode: lookup/pattern` geschrieben. Das neue Format ist eine Liste (siehe
+  oben). Der Bot erkennt die alte Datei beim Start, meldet es im Log und startet
+  nicht. Hattest du dort nichts Eigenes eingetragen, genügt es, die Datei zu
+  löschen. Eigene Werte (z.B. MQTT-Topic oder zusätzliche Felder) übernimmst du
+  im neuen Format.
+- **`/subric_text`** heißt jetzt `/subrictext` (der Befehl folgt dem Feldnamen).
+  Bestehende Abos werden beim Start automatisch umgestellt.
+- **`/ric` sucht nicht mehr in der CSV.** Die RIC gibst du direkt ein, nach
+  Namen suchst du mit `/description`. Bestehende Abos bleiben gültig.
+- **CSV:** `data/descriptions_ric.csv` wird weiterhin automatisch erkannt.
+  `CSV_PATH_DESCRIPTION` funktioniert noch, `CSV_PATH_RIC` genügt aber.
+- Der Bot legt keine leere CSV mehr an. Die Namen füllen sich aus den Alarmen.
+
 ## Grenzen der Telegram-Autovervollständigung
 
 Telegram zeigt im "/"-Menü automatisch alle registrierten Befehle mit
@@ -368,19 +387,18 @@ Echtes "Tippen und sofort Vorschläge sehen" ginge nur über Telegrams
 derzeit nicht umgesetzt, es bräuchte einen eigenen Inline-Handler und die
 Aktivierung bei BotFather.
 
-## Platzhalter in Regex-Zeilen
+## Entwicklung
 
-Bei `isRegex=true` darf der Anzeigename Gruppen aus dem Muster enthalten
-(`\1`, `\2`, ...). Der Bot setzt sie beim Alarm ein:
+Die Tests brauchen nur Python und die Pakete aus `requirements.txt`:
 
-```
-for:     ^23456([0-9]{2})$
-add:     Feuerwehr Musterstadt \1
-Alarm-RIC: 2345625
-Anzeige: Feuerwehr Musterstadt 25
+```bash
+pip install -r requirements.txt
+python -m unittest discover -s tests -t .
 ```
 
-Ohne Platzhalter (wie in der Beispiel-CSV) bleibt der Name unverändert.
+Aufbau: `settings.py` (Konfiguration), `matching.py` (Muster und Abgleich),
+`knowledge.py` (CSV und gelernte Namen), `handlers.py` (Telegram-Befehle),
+`services/mqtt_service.py` (MQTT und Verteilung), `database.py` (SQLite).
 
 ## Für Maintainer: Image veröffentlichen
 
@@ -393,3 +411,4 @@ baut das Image automatisch:
 Einmalig nach dem ersten erfolgreichen Lauf: Auf GitHub unter *Packages →
 bos-telegram-bot → Package settings* die Sichtbarkeit auf **Public** stellen,
 sonst können andere das Image nicht ohne Login ziehen.
+

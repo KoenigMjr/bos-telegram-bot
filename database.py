@@ -39,6 +39,18 @@ def init_db(db_path: str) -> None:
         )
         """
     )
+    # Aus Alarmen gelernte Zuordnungen (z.B. RIC -> Beschreibung), siehe knowledge.py.
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS learned_pairs (
+            for_field TEXT NOT NULL,
+            for_value TEXT NOT NULL,
+            add_value TEXT NOT NULL,
+            last_seen TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (for_field, for_value)
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -132,3 +144,52 @@ def remove_chat_subs(db_path: str, chat_id: int) -> None:
     conn.execute("DELETE FROM subscriptions WHERE chat_id = ?", (chat_id,))
     conn.commit()
     conn.close()
+
+
+def rename_field(db_path: str, old: str, new: str) -> int:
+    """Benennt den Feldschlüssel bestehender Abos um (z.B. nach einer
+    Umbenennung in der Konfiguration). Abos, die dadurch doppelt würden, werden
+    verworfen. Liefert die Zahl der umbenannten Abos."""
+    conn = get_connection(db_path)
+    cur = conn.execute("UPDATE OR IGNORE subscriptions SET field = ? WHERE field = ?", (new, old))
+    renamed = cur.rowcount
+    conn.execute("DELETE FROM subscriptions WHERE field = ?", (old,))
+    conn.commit()
+    conn.close()
+    return renamed
+
+
+def upsert_learned(db_path: str, for_field: str, for_value: str, add_value: str) -> None:
+    conn = get_connection(db_path)
+    conn.execute(
+        """
+        INSERT INTO learned_pairs (for_field, for_value, add_value) VALUES (?, ?, ?)
+        ON CONFLICT(for_field, for_value) DO UPDATE SET
+            add_value = excluded.add_value,
+            last_seen = CURRENT_TIMESTAMP
+        """,
+        (for_field, for_value, add_value),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_learned(db_path: str, for_field: str):
+    conn = get_connection(db_path)
+    rows = conn.execute(
+        "SELECT for_value, add_value FROM learned_pairs WHERE for_field = ? ORDER BY add_value, for_value",
+        (for_field,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+def get_learned(db_path: str, for_field: str, for_value: str):
+    """Liefert den gelernten Namen zu einem Wert oder None."""
+    conn = get_connection(db_path)
+    row = conn.execute(
+        "SELECT add_value FROM learned_pairs WHERE for_field = ? AND for_value = ?",
+        (for_field, for_value),
+    ).fetchone()
+    conn.close()
+    return row["add_value"] if row else None

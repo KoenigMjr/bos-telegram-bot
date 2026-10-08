@@ -1,21 +1,36 @@
 import asyncio
 import html
 import json
-import re
 
 import aiomqtt
 
 import database as db
+import knowledge
+from matching import candidate_values, match_sub, split_list
 
 
-def _build_notification_text(payload: dict, notification_fields: list, matched_alias: str) -> str:
+def _display_items(payload: dict, field: str) -> list:
+    """Anzuzeigende Werte eines Feldes: bei Multicast alle Einträge aus der
+    Liste (je Eintrag eine Zeile), sonst der einzelne Wert."""
+    listed = []
+    for part in split_list(payload.get(f"{field}_list")):
+        if part not in listed:
+            listed.append(part)
+    if len(listed) > 1:
+        return listed
+    primary = payload.get(field)
+    if primary not in (None, ""):
+        return [str(primary)]
+    return listed
+
+
+def build_notification_text(payload: dict, notification_fields: list, matched_aliases: list) -> str:
     lines = ["🚨 <b>BOS-ALARM</b> 🚨", ""]
     for field in notification_fields:
-        value = payload.get(field)
-        if value:
-            lines.append(html.escape(str(value)))
+        for item in _display_items(payload, field):
+            lines.append(html.escape(item))
     lines.append("")
-    lines.append(f"<i>abonniert über: {html.escape(matched_alias)}</i>")
+    lines.append(f"<i>abonniert über: {html.escape(', '.join(matched_aliases))}</i>")
     return "\n".join(lines)
 
 
@@ -30,62 +45,57 @@ async def _notify_subscriber(app, chat_id: int, text: str) -> None:
         print(f"[Telegram Error] Konnte Nachricht an Chat {chat_id} nicht senden: {e}")
 
 
-async def _handle_payload(app, db_path: str, fields_cfg: dict, notification_fields: list, payload: dict) -> None:
+async def handle_payload(app, db_path: str, active_fields: set, notification_fields: list, payload: dict) -> None:
+    """Verteilt einen Alarm an alle Chats, deren Abos passen."""
     # DB-Zugriff ist synchron (sqlite3) -> in Thread auslagern, damit der
     # Event-Loop bei jedem Alarm nicht blockiert.
     subs = await asyncio.to_thread(db.get_all_subs, db_path)
 
-    tasks = []
+    # Pro Chat genau EINE Nachricht, auch wenn mehrere Abos desselben Chats
+    # passen (z.B. Wache und Fahrzeug eines Multicast-Alarms).
+    matches = {}
+    value_cache = {}
     for sub in subs:
-        field_key = sub["field"]
-        field_cfg = fields_cfg.get(field_key)
-        if not field_cfg:
-            continue  # Feld wurde aus der Config entfernt, Sub ignorieren
+        field = sub["field"]
+        if field not in active_fields:
+            continue  # Feld wurde aus der Konfiguration entfernt, Abo ruht
 
-        json_key = field_cfg["json_key"]
-        value = payload.get(json_key)
-        if value is None:
+        if field not in value_cache:
+            value_cache[field] = candidate_values(payload, field)
+        values, raw_list = value_cache[field]
+        if not values:
             continue
 
-        value = str(value)
-        target = sub["target"]
-        is_regex = sub["is_regex"]
+        resolved = match_sub(sub, values, raw_list)
+        if resolved is None:
+            continue
+        aliases = matches.setdefault(sub["chat_id"], [])
+        if resolved not in aliases:
+            aliases.append(resolved)
 
-        match_found = False
-        resolved_alias = sub["alias"]
-
-        if is_regex:
-            m = re.match(target, value)
-            if m:
-                match_found = True
-                try:
-                    # WICHTIG: kein zusätzliches Backslash-Escaping hier -
-                    # m.expand() erwartet \1 / \g<name> genau so, wie es aus
-                    # der CSV kommt. Doppeltes Escapen würde die Platzhalter-
-                    # Auflösung unwirksam machen.
-                    resolved_alias = m.expand(sub["alias"])
-                except (re.error, IndexError) as e:
-                    print(f"[Regex] Konnte Alias '{sub['alias']}' nicht auflösen: {e}")
-        else:
-            if value == target:
-                match_found = True
-
-        if match_found:
-            text = _build_notification_text(payload, notification_fields, resolved_alias)
-            tasks.append(_notify_subscriber(app, sub["chat_id"], text))
-
+    tasks = [
+        _notify_subscriber(app, chat_id, build_notification_text(payload, notification_fields, aliases))
+        for chat_id, aliases in matches.items()
+    ]
     if tasks:
         await asyncio.gather(*tasks)
+
+
+async def learn_payload(db_path: str, entries: list, payload: dict) -> None:
+    """Merkt sich neue Wertepaare. Fehler hier dürfen die Alarmverteilung nie stören."""
+    try:
+        await asyncio.to_thread(knowledge.learn_from_payload, db_path, entries, payload)
+    except Exception as e:
+        print(f"[Lernen] Fehler (wird ignoriert): {e}")
 
 
 async def start_mqtt_listener(app):
     config = app.bot_data["config"]
     mqtt_conf = config["mqtt"]
     db_path = config["files"]["db_path"]
-    fields_cfg = config["fields"]
-    notification_fields = config.get("notification_fields") or list(
-        {f["json_key"] for f in fields_cfg.values()}
-    )
+    entries = app.bot_data["entries"]
+    active_fields = app.bot_data["active_fields"]
+    notification_fields = config.get("notification_fields") or ["description", "message", "ric"]
 
     while True:
         try:
@@ -116,7 +126,8 @@ async def start_mqtt_listener(app):
                     # Keine eigene Dedupe-/Filterlogik hier: BOSWatch3 liefert
                     # bereits fertig aufbereitete, einzeln zustellbare Alarme.
                     app.bot_data["last_payload"] = payload
-                    await _handle_payload(app, db_path, fields_cfg, notification_fields, payload)
+                    await handle_payload(app, db_path, active_fields, notification_fields, payload)
+                    await learn_payload(db_path, entries, payload)
 
         except aiomqtt.MqttError as e:
             print(f"[MQTT Error] {e}. Verbinde neu in 5 Sekunden...")
