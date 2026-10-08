@@ -1,8 +1,8 @@
 import re
 import unittest
 
-from matching import (candidate_values, has_wildcard_syntax, match_sub, split_list,
-                      split_list_aligned, wildcard_to_regex)
+from matching import (candidate_values, has_range_syntax, has_wildcard_syntax, is_pattern_input, match_sub,
+                      number_at_least_regex, split_list, split_list_aligned, wildcard_to_regex)
 
 
 def sub(target, is_regex=False, alias="Alias"):
@@ -61,6 +61,106 @@ class WildcardTests(unittest.TestCase):
             self.assertTrue(has_wildcard_syntax(text), text)
         for text in ("1000001", "Rettungswagen Musterstadt", ""):
             self.assertFalse(has_wildcard_syntax(text), text)
+
+
+class NumberAtLeastTests(unittest.TestCase):
+    """Der Zahlenvergleich wird gegen die normale Python-Rechnung geprüft."""
+
+    @staticmethod
+    def matcher(digits):
+        return re.compile(number_at_least_regex(digits))
+
+    def test_every_threshold_up_to_300_against_python(self):
+        for n in range(0, 301):
+            rx = self.matcher(str(n))
+            for v in range(0, 1501):
+                self.assertEqual(bool(rx.fullmatch(str(v))), v >= n, f"{v} >= {n}")
+
+    def test_digit_count_boundaries(self):
+        for n in (9, 10, 99, 100, 999, 1000, 9999, 10000, 123456, 999999):
+            rx = self.matcher(str(n))
+            for v in list(range(n - 12, n + 12)) + [10 ** 9, 10 ** 12, n * 7, n * 10]:
+                if v >= 0:
+                    self.assertEqual(bool(rx.fullmatch(str(v))), v >= n, f"{v} >= {n}")
+
+    def test_leading_zero_compares_digit_by_digit_in_same_length(self):
+        for s in ("0230100", "0000000", "0999999", "0009", "0123456"):
+            rx = self.matcher(s)
+            width = len(s)
+            for v in range(max(0, int(s) - 40), min(10 ** width, int(s) + 40)):
+                self.assertEqual(bool(rx.fullmatch(f"{v:0{width}d}")), v >= int(s), f"{v} >= {s}")
+            self.assertFalse(rx.fullmatch("1" + s), "längere Zeichenkette darf nicht passen")
+            self.assertFalse(rx.fullmatch(s[1:]), "kürzere Zeichenkette darf nicht passen")
+
+    def test_zero_matches_any_number(self):
+        self.assertTrue(self.matcher("0").fullmatch("0"))
+        self.assertTrue(self.matcher("0").fullmatch("57"))
+
+
+class RangeSyntaxTests(unittest.TestCase):
+    def matches(self, pattern, text):
+        return bool(re.match(wildcard_to_regex(pattern), text))
+
+    def test_b3_and_higher(self):
+        for text in ("B 3", "B 3 - Wohnungsbrand", "B 4", "B 5 - Großbrand", "B 10", "B 30", "B 120 - Lage"):
+            self.assertTrue(self.matches("B 3+", text), text)
+        for text in ("B 1", "B 2 - Zimmerbrand", "B 0", "RD 3", "THL 4 - Unfall"):
+            self.assertFalse(self.matches("B 3+", text), text)
+
+    def test_every_number_in_a_text_against_python(self):
+        for threshold in (1, 3, 9, 10, 25):
+            regex = wildcard_to_regex(f"B {threshold}+")
+            for v in range(0, 200):
+                self.assertEqual(bool(re.match(regex, f"B {v} - Text")), v >= threshold, f"B {v} >= {threshold}")
+
+    def test_behaves_like_plain_text_without_wildcard(self):
+        # 'B 3' (enthält) und 'B 3+' erfassen beide Text hinter der Zahl
+        self.assertTrue(self.matches("B 3", "B 3 - Wohnungsbrand"))
+        self.assertTrue(self.matches("B 3+", "B 3 - Wohnungsbrand"))
+
+    def test_literal_plus_in_alarm_text_still_triggers(self):
+        self.assertTrue(self.matches("B 3+", "B 3+ - Wohnungsbrand"))
+        self.assertTrue(self.matches("B 3+", "B 4+"))
+        self.assertFalse(self.matches("B 3+", "B 2+"))
+
+    def test_case_insensitive(self):
+        self.assertTrue(self.matches("b 3+", "B 7"))
+
+    def test_with_star_the_whole_text_is_matched(self):
+        self.assertTrue(self.matches("B 3+*", "B 12 - Lage"))
+        self.assertTrue(self.matches("*B 3+*", "Einsatz B 12 läuft"))
+        self.assertFalse(self.matches("B 3+*", "Einsatz B 12"))
+        self.assertTrue(self.matches("B 3+", "Einsatz B 12"))   # ohne Stern: enthält
+
+    def test_anchor_option(self):
+        anchored = wildcard_to_regex("B 3+", anchor=True)
+        self.assertTrue(re.match(anchored, "B 7"))
+        self.assertFalse(re.match(anchored, "B 7 - Lage"))
+        self.assertTrue(re.match(wildcard_to_regex("THL*", anchor=False), "THL Tür"))
+
+    def test_other_characters_stay_literal(self):
+        self.assertTrue(self.matches("(B 3+)", "(B 7)"))
+        self.assertFalse(self.matches("(B 3+)", "B 7"))
+
+    def test_two_numbers(self):
+        self.assertTrue(self.matches("B 3+ RD 2+", "B 5 RD 4"))
+        self.assertFalse(self.matches("B 3+ RD 2+", "B 5 RD 1"))
+
+    def test_raw_regex_is_left_alone(self):
+        self.assertFalse(has_range_syntax("re:^3+"))
+        self.assertTrue(re.match(wildcard_to_regex("re:^3+"), "333"))
+        self.assertFalse(re.match(wildcard_to_regex("re:^3+"), "4"))
+
+    def test_detection(self):
+        for text in ("B 3+", "3+", "13+x", "THL3+"):
+            self.assertTrue(has_range_syntax(text), text)
+            self.assertTrue(is_pattern_input(text), text)
+        for text in ("B 3", "B +", "C++", "a+b", "B 3 +", "re:3+", "1234567"):
+            self.assertFalse(has_range_syntax(text), text)
+        self.assertTrue(is_pattern_input("THL*") and not is_pattern_input("THL"))
+
+    def test_range_alone_is_not_an_explicit_wildcard(self):
+        self.assertFalse(has_wildcard_syntax("B 3+"))
 
 
 class ListTests(unittest.TestCase):
