@@ -134,6 +134,62 @@ class ForCommandTests(CommandTestCase):
         self.assertEqual(len(self.subs(-100)), 1)
 
 
+class RangeCommandTests(CommandTestCase):
+    async def test_message_b3_plus(self):
+        reply = await self.command("message", "B", "3+")
+        (sub,) = self.subs()
+        self.assertEqual((sub["field"], sub["is_regex"], sub["alias"]), ("message", 1, "Alarmstichwort: B 3+"))
+        self.assertIn("Filter angelegt", sent_text(reply))
+        for text, expected in [("B 1 - Kleinbrand", False), ("B 2 - Zimmerbrand", False),
+                               ("B 3 - Wohnungsbrand", True), ("B 4", True), ("B 10 - Lage", True),
+                               ("RD 3 - Herz", False)]:
+            self.assertEqual(matches(sub, {"message": text}, "message"), expected, text)
+
+    async def test_old_plain_subscription_still_works_next_to_it(self):
+        await self.command("message", "B", "3")
+        await self.command("message", "B", "3+")
+        self.assertEqual(len(self.subs()), 2)
+
+    async def test_exact_field_anchors_the_range_to_the_whole_value(self):
+        await self.command("ric", "1000000+")
+        (sub,) = self.subs()
+        self.assertEqual(sub["is_regex"], 1)
+        for value, expected in [("1000000", True), ("1000001", True), ("9999999", True),
+                                ("0999999", False), ("999999", False), ("x1000001", False)]:
+            self.assertEqual(matches(sub, {"ric": value}, "ric"), expected, value)
+
+    async def test_ric_with_leading_zero_compares_in_same_length(self):
+        await self.command("ric", "0230100+")
+        (sub,) = self.subs()
+        for value, expected in [("0230100", True), ("0230101", True), ("0999999", True),
+                                ("0230099", False), ("0100000", False), ("10230100", False)]:
+            self.assertEqual(matches(sub, {"ric": value}, "ric"), expected, value)
+
+    async def test_range_in_name_search_creates_a_pattern_directly(self):
+        reply = await self.command("ric", "Fahrzeug 3+", kind="add")
+        (sub,) = self.subs()
+        self.assertEqual((sub["field"], sub["is_regex"]), ("description", 1))
+        self.assertTrue(matches(sub, {"description": "Fahrzeug 7 Nord"}, "description"))
+        self.assertFalse(matches(sub, {"description": "Fahrzeug 2 Nord"}, "description"))
+        self.assertIn("Filter angelegt", sent_text(reply))
+
+    async def test_multicast_list_is_checked_for_ranges_too(self):
+        await self.command("message", "B", "3+")
+        (sub,) = self.subs()
+        payload = {"message": "B 1", "message_list": "B 1, B 4"}
+        self.assertTrue(matches(sub, payload, "message"))
+
+    async def test_hint_against_last_alarm(self):
+        self.env.context.bot_data["last_payload"] = {"message": "B 5 - Großbrand"}
+        self.assertIn("Passt auf den letzten Alarm", sent_text(await self.command("message", "B", "3+")))
+        self.env.context.bot_data["last_payload"] = {"message": "B 2 - Zimmerbrand"}
+        self.assertIn("Passt nicht auf den letzten Alarm", sent_text(await self.command("message", "B", "4+")))
+
+    async def test_help_shows_the_syntax_for_text_fields_only(self):
+        self.assertIn("/message B 3+", sent_text(await self.command("message")))
+        self.assertNotIn("3+", sent_text(await self.command("ric")))
+
+
 class HintTests(CommandTestCase):
     async def test_unknown_value_hint(self):
         text = sent_text(await self.command("ric", "9999999"))

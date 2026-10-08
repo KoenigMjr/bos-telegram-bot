@@ -104,12 +104,18 @@ Wer ein Muster eingibt, bestimmt selbst, was gelten soll:
 | `/ric *301*`         | alle RICs, die 301 **enthalten**        |
 | `/message THL*`      | Text beginnt mit "THL"                  |
 | `/message THL`       | Text enthält "THL"                      |
+| `/message B 3+`      | "B" mit Zahl 3 **oder höher** (B 3, B 4, B 10 …, nicht B 1 und B 2) |
 | `/message re:^RD\s?\d` | rohe Regex für Fortgeschrittene     |
 
 Ohne Platzhalter gilt bei **RIC und Sub-RIC genau dieser Wert**, bei allen
 anderen Feldern "enthält". `/ric 301` trifft also nicht jede RIC mit 301
 darin, das geht nur mit `*301*`. Welches Feld wie reagiert, legt die Option
 `match` fest (siehe [Konfiguration](#konfiguration-anpassen-optional)).
+
+Eine Zahl mit angehängtem `+` heißt "diese Zahl oder jede größere". Verglichen
+wird der Zahlenwert, `B 3+` trifft also auch "B 12". Wie bei `B 3` darf hinter der
+Zahl weiterer Text stehen (z.B. "B 3 - Wohnungsbrand"). Ein Alarmtext, der selbst
+"B 3+" enthält, löst ebenfalls aus.
 
 Platzhalter-Muster ignorieren Groß-/Kleinschreibung (`thl*` trifft "THL Tür").
 Rohe `re:`-Ausdrücke gelten genau wie eingegeben.

@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes
 
 import database as db
 import knowledge
-from matching import candidate_values, has_wildcard_syntax, match_sub, wildcard_to_regex
+from matching import candidate_values, is_pattern_input, match_sub, wildcard_to_regex
 
 ITEMS_PER_PAGE = 5
 
@@ -333,6 +333,7 @@ def _for_prompt(entry: dict):
         lines = [
             f"• <code>/{cmd} Text</code> – enthält Text",
             f"• <code>/{cmd} Anfang*</code> – beginnt mit …",
+            f"• <code>/{cmd} B 3+</code> – „B“ mit Zahl 3 oder höher",
             f"• <code>/{cmd} re:…</code> – reguläre Ausdrücke",
         ]
         placeholder = "Text oder Muster, z.B. THL*"
@@ -365,13 +366,14 @@ def make_for_handler(entry: dict):
         raw = " ".join(context.args).strip()
         name = None
         try:
-            if match == "exact" and not has_wildcard_syntax(raw):
+            if match == "exact" and not is_pattern_input(raw):
                 target, is_regex = raw, False
                 if entry.get("add"):
                     name = knowledge.resolve_name(entry, db_path, raw)
                 alias = name or f"{label}: {raw}"
             else:
-                target, is_regex = wildcard_to_regex(raw), True
+                # Bei Feldern mit 'exact' gilt ein Muster immer für den ganzen Wert.
+                target, is_regex = wildcard_to_regex(raw, anchor=True if match == "exact" else None), True
                 alias = f"{label}: {raw}"
         except re.error as e:
             return await update.message.reply_text(f"❌ Ungültiges Muster: {html.escape(str(e))}")
@@ -458,7 +460,7 @@ def make_add_handler(entry: dict):
             return await _ask(update, context, text, "Name oder Muster, z.B. *wagen*", ("add", for_key))
 
         raw = " ".join(context.args).strip()
-        if has_wildcard_syntax(raw):
+        if is_pattern_input(raw):
             return await _create_name_pattern(reply, context, chat_id, entry, raw)
 
         rows = knowledge.known_rows(db_path, entry)
