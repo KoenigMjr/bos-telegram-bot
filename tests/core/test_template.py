@@ -1,6 +1,6 @@
 import unittest
 
-from template import (DEFAULT_TEMPLATE, html_problems, render, template_from_fields,
+from bos_telegram_bot.core.template import (DEFAULT_TEMPLATE, html_problems, render, template_from_fields,
                       validate_template)
 
 # Multicast-Alarm in der Struktur, wie BOSWatch3 ihn liefert (alle Werte erfunden).

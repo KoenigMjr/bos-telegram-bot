@@ -11,10 +11,10 @@ import re
 
 import yaml
 
-from template import DEFAULT_TEMPLATE, FIELD_NAME, template_from_fields, validate_template
+from bos_telegram_bot.core.template import DEFAULT_TEMPLATE, FIELD_NAME, template_from_fields, validate_template
 
-# Die mitgelieferte config.yaml liegt neben diesem Modul (im Image bzw. Repo).
-BUNDLED_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
+# Die mitgelieferte config.yaml liegt im Hauptordner (im Image bzw. Repo), eine Ebene über dem Paket.
+BUNDLED_CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
 OPTIONAL_CONFIG_PATH = os.path.join("data", "config.yaml")
 
 RESERVED_COMMANDS = {"start", "abo", "lastraw", "users", "adduser"}

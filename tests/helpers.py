@@ -5,10 +5,11 @@ import tempfile
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
-import database as db
-import handlers
-import settings
-from template import DEFAULT_TEMPLATE
+from bos_telegram_bot.storage import database as db
+from bos_telegram_bot.chat import admin as chat_admin
+from bos_telegram_bot.chat import fields as chat_fields
+from bos_telegram_bot import config as cfg
+from bos_telegram_bot.core.template import DEFAULT_TEMPLATE
 
 BOT_ID = 999
 _message_ids = itertools.count(100)
@@ -32,7 +33,7 @@ def make_entries(extra=None, csv_rows=None):
         {"for": "subricText", "label": "Sub-RIC", "match": "exact"},
     ] + (extra or [])
     config = {"fields": fields}
-    settings.normalize_entries(config)
+    cfg.normalize_entries(config)
     for entry in config["fields"]:
         entry["csv_rows"] = list(csv_rows or []) if entry.get("add") else []
     return config["fields"]
@@ -57,7 +58,7 @@ class Env:
                 "config": {"files": {"db_path": self.db_path}},
                 "admins": list(admins),
                 "entries": entries,
-                "command_map": settings.build_command_map(entries),
+                "command_map": cfg.build_command_map(entries),
                 "active_fields": {e["for"] for e in entries} | {e["add"] for e in entries if e.get("add")},
                 "field_labels": {
                     **{e["for"]: e["label"] for e in entries},
@@ -71,10 +72,10 @@ class Env:
 
     @staticmethod
     def _prompt_handlers(entries):
-        """Wie in main.main(): welcher Befehl gehört zu welcher Rückfrage."""
-        result = {("adduser", ""): handlers.adduser_handler}
-        for cmd in settings.build_command_map(entries):
-            make = handlers.make_for_handler if cmd["kind"] == "for" else handlers.make_add_handler
+        """Wie in app.main(): welcher Befehl gehört zu welcher Rückfrage."""
+        result = {("adduser", ""): chat_admin.adduser_handler}
+        for cmd in cfg.build_command_map(entries):
+            make = chat_fields.make_for_handler if cmd["kind"] == "for" else chat_fields.make_add_handler
             result[(cmd["kind"], cmd["entry"]["for"])] = make(cmd["entry"])
         return result
 

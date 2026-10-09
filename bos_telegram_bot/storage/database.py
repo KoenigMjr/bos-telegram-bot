@@ -87,7 +87,7 @@ def get_chat_subs(db_path: str, chat_id: int):
 
 
 def get_all_subs(db_path: str):
-    """Wird pro eintreffendem MQTT-Alarm aufgerufen -> im mqtt_service via
+    """Wird pro eintreffendem MQTT-Alarm aufgerufen -> in mqtt/dispatch via
     asyncio.to_thread ausführen, damit der Event-Loop nicht blockiert."""
     conn = get_connection(db_path)
     c = conn.cursor()

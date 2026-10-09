@@ -1,7 +1,7 @@
 import re
 import unittest
 
-from matching import (candidate_values, has_range_syntax, has_wildcard_syntax, is_pattern_input, match_sub,
+from bos_telegram_bot.core.matching import (candidate_values, has_range_syntax, has_wildcard_syntax, is_pattern_input, match_sub,
                       number_at_least_regex, split_list, split_list_aligned, wildcard_to_regex)
 
 

@@ -500,7 +500,7 @@ Container starten. Ein Update des Images berührt den Datenordner nicht.
 ## Grenzen der Telegram-Autovervollständigung
 
 Telegram zeigt im "/"-Menü automatisch alle registrierten Befehle mit
-Beschreibung an (`set_my_commands` in `main.py`) — das ist aber nur eine
+Beschreibung an (`set_my_commands` in `bos_telegram_bot/app.py`) — das ist aber nur eine
 Vervollständigung des **Befehlsnamens**. Eine Live-Vorschlagsliste *während*
 du z.B. bei `/description Mus` tippst, unterstützt Telegram für normale
 Nachrichten nicht. Die aktuelle Lösung (Eingabe abschicken → bei mehreren
@@ -520,9 +520,38 @@ pip install -r requirements.txt
 python -m unittest discover -s tests -t .
 ```
 
-Aufbau: `settings.py` (Konfiguration), `matching.py` (Muster und Abgleich),
-`knowledge.py` (CSV und gelernte Namen), `template.py` (Aufbau der Alarm-Nachricht), `handlers.py` (Telegram-Befehle),
-`services/mqtt_service.py` (MQTT und Verteilung), `database.py` (SQLite).
+### Aufbau
+
+```
+main.py                    dünner Einstieg (das Dockerfile startet diese Datei)
+config.yaml                Standardkonfiguration, steckt im Image
+bos_telegram_bot/
+  app.py                   Verdrahtung: Konfiguration, Datenbank, Telegram-Befehle, Start
+  config.py                Konfiguration laden, zusammenführen und prüfen
+  core/                    reine Logik, ohne Telegram und ohne Datenbank
+    matching.py              Muster, Platzhalter, "Zahl+", Abgleich mit Multicast-Listen
+    template.py              Aufbau der Alarm-Nachricht
+  storage/
+    database.py              SQLite: Abos, Benutzer, gelernte Namen
+    knowledge.py             CSV und gelernte Namen
+  mqtt/
+    listener.py              Verbindung zum Broker, nimmt Alarme entgegen
+    dispatch.py              gleicht ab, baut die Nachricht, sendet sie
+  chat/                    Telegram-Seite
+    access.py                Admins, Freigabe, Zugriffsanfragen
+    fields.py                /ric, /message ... und die Namenssuche /description
+    prompts.py               Rückfrage-Dialog
+    hints.py                 Hinweise gegen Tippfehler
+    overview.py              /start, /lastraw, /abo
+    admin.py                 /users, /adduser
+    buttons.py               Klicks auf Inline-Buttons
+    common.py                kleine Hilfen
+tests/                     spiegelt diese Struktur
+```
+
+Die Schichten bauen aufeinander auf: `core` kennt weder Telegram noch die Datenbank, `storage` kennt
+kein Telegram, `mqtt` und `chat` nutzen beide `core` und `storage`, kennen sich aber nicht. Ein Test
+(`tests/test_architecture.py`) hält diese Regeln ein.
 
 ## Für Maintainer: Image veröffentlichen
 

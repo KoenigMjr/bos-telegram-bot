@@ -8,8 +8,8 @@ import csv
 import os
 import re
 
-import database as db
-from matching import split_list_aligned
+from bos_telegram_bot.core.matching import split_list_aligned
+from bos_telegram_bot.storage import database as db
 
 
 def load_csv(csv_path: str) -> list:

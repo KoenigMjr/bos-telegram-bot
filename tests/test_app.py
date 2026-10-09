@@ -8,9 +8,11 @@ from unittest.mock import patch
 from telegram import Chat, Message, MessageEntity, Update, User
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler
 
-import database as db
-import main
-from template import DEFAULT_TEMPLATE
+from bos_telegram_bot.storage import database as db
+from bos_telegram_bot import app as bot_app
+from bos_telegram_bot import config as cfg
+from tests.helpers import make_entries
+from bos_telegram_bot.core.template import DEFAULT_TEMPLATE
 
 CSV = "for,add,isRegex\n1234567,Rettungswagen Musterstadt A-Wehr,false\n^23456([0-9]{2})$,Feuerwehr Musterstadt,true\n"
 ENV = {"TELEGRAM_BOT_TOKEN": "123:dummy", "ADMIN_USERS": "1,2", "MQTT_HOST": "mqtt.local"}
@@ -29,12 +31,12 @@ class WiringTestCase(unittest.TestCase):
             self.addCleanup(patcher.stop)
 
     def start(self, **env):
-        """Führt main.main() aus, nur das Polling ist ersetzt. Liefert die Application."""
+        """Führt bot_app.main() aus, nur das Polling ist ersetzt. Liefert die Application."""
         captured = {}
         environment = {**ENV, **env}
         with patch.dict(os.environ, environment, clear=True), \
                 patch.object(Application, "run_polling", lambda self, *a, **k: captured.update(app=self)):
-            main.main()
+            bot_app.main()
         return captured["app"]
 
 
@@ -87,25 +89,25 @@ class StartupTests(WiringTestCase):
 class StartupErrorTests(WiringTestCase):
     def test_missing_token(self):
         with patch.dict(os.environ, {"ADMIN_USERS": "1"}, clear=True), self.assertRaises(SystemExit) as ctx:
-            main.main()
+            bot_app.main()
         self.assertIn("TELEGRAM_BOT_TOKEN", str(ctx.exception))
 
     def test_missing_admins(self):
         with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "123:x"}, clear=True), self.assertRaises(SystemExit) as ctx:
-            main.main()
+            bot_app.main()
         self.assertIn("ADMIN_USERS ist leer", str(ctx.exception))
 
     def test_old_variable_name_gives_hint(self):
         env = {"TELEGRAM_BOT_TOKEN": "123:x", "ALLOWED_USERS": "1"}
         with patch.dict(os.environ, env, clear=True), self.assertRaises(SystemExit) as ctx:
-            main.main()
+            bot_app.main()
         self.assertIn("umbenannt", str(ctx.exception))
 
     def test_old_config_format_stops_the_start_with_explanation(self):
         with open("data/config.yaml", "w", encoding="utf-8") as f:
             f.write("fields:\n  ric:\n    mode: lookup\n")
         with patch.dict(os.environ, ENV, clear=True), self.assertRaises(SystemExit) as ctx:
-            main.main()
+            bot_app.main()
         self.assertIn("neues Format", str(ctx.exception))
 
 
@@ -137,6 +139,17 @@ class ReplyFilterTests(WiringTestCase):
 
     def test_command_is_left_to_the_command_handlers(self):
         self.assertFalse(self.handler.check_update(self.update("/ric 301*", reply_to=self.original(), command=True)))
+
+
+
+class MenuTests(unittest.TestCase):
+    def test_menu_contains_every_command_with_description(self):
+        entries = make_entries()
+        menu = bot_app.build_menu(cfg.build_command_map(entries))
+        names = [c.command for c in menu]
+        self.assertEqual(names, ["start", "abo", "lastraw", "ric", "description", "message", "subrictext"])
+        self.assertTrue(all(1 <= len(c.description) <= 256 for c in menu))
+        self.assertIn("Fahrzeug / Wache suchen", [c.description for c in menu])
 
 
 if __name__ == "__main__":

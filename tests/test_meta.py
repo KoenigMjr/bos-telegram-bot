@@ -25,15 +25,17 @@ def overridden_methods(cls) -> list:
 
 
 def test_modules():
-    for path in sorted(glob.glob(os.path.join(TESTS_DIR, "test_*.py"))):
-        yield os.path.basename(path)[:-3], path
+    """(Modulname, Pfad) aller Testdateien, auch in Unterordnern."""
+    root = os.path.dirname(TESTS_DIR)
+    for path in sorted(glob.glob(os.path.join(TESTS_DIR, "**", "test_*.py"), recursive=True)):
+        yield os.path.relpath(path, root)[:-3].replace(os.sep, "."), path
 
 
 class TestSuiteIntegrityTests(unittest.TestCase):
     def test_no_test_class_overrides_a_unittest_method(self):
         problems = []
         for name, _ in test_modules():
-            module = importlib.import_module(f"tests.{name}")
+            module = importlib.import_module(name)
             for cls_name, cls in inspect.getmembers(module, inspect.isclass):
                 if not issubclass(cls, unittest.TestCase) or cls.__module__ != module.__name__:
                     continue
