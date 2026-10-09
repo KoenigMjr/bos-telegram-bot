@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import database as db
 import handlers
 import settings
+from template import DEFAULT_TEMPLATE
 
 BOT_ID = 999
 _message_ids = itertools.count(100)
@@ -64,6 +65,7 @@ class Env:
                 },
                 "last_payload": None,
                 "prompt_handlers": self._prompt_handlers(entries),
+                "notification_template": DEFAULT_TEMPLATE,
             },
         )
 

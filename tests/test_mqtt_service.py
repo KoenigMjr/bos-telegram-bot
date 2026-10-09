@@ -4,9 +4,11 @@ from unittest.mock import patch
 import database as db
 from matching import wildcard_to_regex
 from services import mqtt_service as ms
+from template import DEFAULT_TEMPLATE, template_from_fields
 from tests.helpers import Env
 
 NOTIFY = ["description", "message", "ric"]
+TEMPLATE = template_from_fields(NOTIFY)   # der Aufbau früherer Versionen
 
 
 class DistributionTests(unittest.IsolatedAsyncioTestCase):
@@ -16,7 +18,7 @@ class DistributionTests(unittest.IsolatedAsyncioTestCase):
     async def alarm(self, payload):
         self.env.bot.sent.clear()
         app = type("App", (), {"bot": self.env.bot})()
-        await ms.handle_payload(app, self.env.db_path, self.env.context.bot_data["active_fields"], NOTIFY, payload)
+        await ms.handle_payload(app, self.env.db_path, self.env.context.bot_data["active_fields"], TEMPLATE, payload)
         return {m["chat_id"]: m["text"] for m in self.env.bot.sent}
 
     def sub(self, chat, field, target, alias="Alias", regex=False):
@@ -74,15 +76,53 @@ class DistributionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.alarm({"ric": ""}), {})
 
 
+class TemplateInDistributionTests(unittest.IsolatedAsyncioTestCase):
+    """Die konfigurierte Vorlage bestimmt den Aufbau der gesendeten Nachricht."""
+
+    MULTICAST = {
+        "ric": "1000043", "ric_list": "1000011, 1000043",
+        "description": "1000043", "description_list": "Lagedienst Musterstadt, 1000043",
+        "message": "TEST Beispieltext", "message_list": ", ",
+    }
+
+    async def send(self, template, payload=None):
+        env = Env(self)
+        db.add_sub(env.db_path, 11, "ric", "1000011", "RIC: 1000011", False)
+        app = type("App", (), {"bot": env.bot})()
+        await ms.handle_payload(app, env.db_path, env.context.bot_data["active_fields"], template,
+                                payload or self.MULTICAST)
+        return env.bot.sent[0]["text"]
+
+    async def test_default_layout(self):
+        text = await self.send(DEFAULT_TEMPLATE)
+        self.assertEqual(text, "🚨 <b>BOS-ALARM</b> 🚨\n\nLagedienst Musterstadt\n1000043\nTEST Beispieltext"
+                               "\n\n<i>abonniert über: RIC: 1000011</i>")
+
+    async def test_ric_numbers_are_not_repeated_in_the_default_layout(self):
+        text = await self.send(DEFAULT_TEMPLATE)
+        self.assertEqual(text.count("1000011"), 1)      # nur im 'abonniert über'
+        self.assertEqual(text.count("1000043"), 1)
+
+    async def test_custom_template_is_used(self):
+        text = await self.send("<b>{MESSAGE}</b>\n• {DESCRIPTION_LIST}\n{MATCHED}")
+        self.assertEqual(text, "<b>TEST Beispieltext</b>\n• Lagedienst Musterstadt\n• 1000043\nRIC: 1000011")
+
+    async def test_old_layout_from_notification_fields_is_unchanged(self):
+        text = await self.send(TEMPLATE)
+        lines = text.split("\n")
+        for expected in ("Lagedienst Musterstadt", "1000043", "TEST Beispieltext", "1000011"):
+            self.assertIn(expected, lines)
+
+
 class NotificationTextTests(unittest.TestCase):
     def test_multicast_shows_every_entry_on_its_own_line(self):
-        text = ms.build_notification_text(DistributionTests.MULTICAST, NOTIFY, ["Wache"])
+        text = ms.build_notification_text(DistributionTests.MULTICAST, TEMPLATE, ["Wache"])
         lines = text.split("\n")
         for expected in ("Wache Musterstadt", "Rettungswagen Musterstadt", "RD 1 - Test", "1000001", "1000002"):
             self.assertIn(expected, lines)
 
     def test_single_alarm_and_html_escaping(self):
-        text = ms.build_notification_text({"description": "A & B <x>", "ric": "1"}, NOTIFY, ["Alias <b>"])
+        text = ms.build_notification_text({"description": "A & B <x>", "ric": "1"}, TEMPLATE, ["Alias <b>"])
         self.assertIn("A &amp; B &lt;x&gt;", text)
         self.assertIn("abonniert über: Alias &lt;b&gt;", text)
 

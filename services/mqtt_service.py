@@ -1,37 +1,17 @@
 import asyncio
-import html
 import json
 
 import aiomqtt
 
 import database as db
 import knowledge
-from matching import candidate_values, match_sub, split_list
+from matching import candidate_values, match_sub
+from template import render
 
 
-def _display_items(payload: dict, field: str) -> list:
-    """Anzuzeigende Werte eines Feldes: bei Multicast alle Einträge aus der
-    Liste (je Eintrag eine Zeile), sonst der einzelne Wert."""
-    listed = []
-    for part in split_list(payload.get(f"{field}_list")):
-        if part not in listed:
-            listed.append(part)
-    if len(listed) > 1:
-        return listed
-    primary = payload.get(field)
-    if primary not in (None, ""):
-        return [str(primary)]
-    return listed
-
-
-def build_notification_text(payload: dict, notification_fields: list, matched_aliases: list) -> str:
-    lines = ["🚨 <b>BOS-ALARM</b> 🚨", ""]
-    for field in notification_fields:
-        for item in _display_items(payload, field):
-            lines.append(html.escape(item))
-    lines.append("")
-    lines.append(f"<i>abonniert über: {html.escape(', '.join(matched_aliases))}</i>")
-    return "\n".join(lines)
+def build_notification_text(payload: dict, template: str, matched_aliases: list) -> str:
+    """Setzt die Nachricht nach der konfigurierten Vorlage zusammen (siehe template.py)."""
+    return render(template, payload, matched_aliases)
 
 
 async def _notify_subscriber(app, chat_id: int, text: str) -> None:
@@ -45,7 +25,7 @@ async def _notify_subscriber(app, chat_id: int, text: str) -> None:
         print(f"[Telegram Error] Konnte Nachricht an Chat {chat_id} nicht senden: {e}")
 
 
-async def handle_payload(app, db_path: str, active_fields: set, notification_fields: list, payload: dict) -> None:
+async def handle_payload(app, db_path: str, active_fields: set, template: str, payload: dict) -> None:
     """Verteilt einen Alarm an alle Chats, deren Abos passen."""
     # DB-Zugriff ist synchron (sqlite3) -> in Thread auslagern, damit der
     # Event-Loop bei jedem Alarm nicht blockiert.
@@ -74,7 +54,7 @@ async def handle_payload(app, db_path: str, active_fields: set, notification_fie
             aliases.append(resolved)
 
     tasks = [
-        _notify_subscriber(app, chat_id, build_notification_text(payload, notification_fields, aliases))
+        _notify_subscriber(app, chat_id, build_notification_text(payload, template, aliases))
         for chat_id, aliases in matches.items()
     ]
     if tasks:
@@ -95,7 +75,7 @@ async def start_mqtt_listener(app):
     db_path = config["files"]["db_path"]
     entries = app.bot_data["entries"]
     active_fields = app.bot_data["active_fields"]
-    notification_fields = config.get("notification_fields") or ["description", "message", "ric"]
+    template = app.bot_data["notification_template"]
 
     while True:
         try:
@@ -126,7 +106,7 @@ async def start_mqtt_listener(app):
                     # Keine eigene Dedupe-/Filterlogik hier: BOSWatch3 liefert
                     # bereits fertig aufbereitete, einzeln zustellbare Alarme.
                     app.bot_data["last_payload"] = payload
-                    await handle_payload(app, db_path, active_fields, notification_fields, payload)
+                    await handle_payload(app, db_path, active_fields, template, payload)
                     await learn_payload(db_path, entries, payload)
 
         except aiomqtt.MqttError as e:

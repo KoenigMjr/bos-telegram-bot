@@ -99,6 +99,7 @@ def main():
             **{e["add"]: e["add_label"] for e in entries if e.get("add")},
         },
         "last_payload": None,
+        "notification_template": settings.notification_template(config),
     })
 
     app.add_handler(CommandHandler("start", handlers.start_handler))

@@ -416,6 +416,11 @@ def _pattern_button(entry: dict, text: str) -> list:
     return [InlineKeyboardButton(text, callback_data=f"pat:{entry['for']}")]
 
 
+def _cancel_row(for_key: str) -> list:
+    """Eigene Zeile, damit man nicht versehentlich daneben tippt."""
+    return [InlineKeyboardButton("✖️ Abbrechen", callback_data=f"cancel:{for_key}")]
+
+
 async def send_page(reply, for_key: str, results: list, page: int, term: str = ""):
     start_idx = page * ITEMS_PER_PAGE
     end_idx = start_idx + ITEMS_PER_PAGE
@@ -434,6 +439,7 @@ async def send_page(reply, for_key: str, results: list, page: int, term: str = "
         keyboard.append(nav)
     if term:
         keyboard.append([InlineKeyboardButton(f"🔎 Alle mit „{term[:25]}“ als Muster", callback_data=f"pat:{for_key}")])
+    keyboard.append(_cancel_row(for_key))
 
     text = f"🔍 Treffer {start_idx+1}-{min(end_idx, len(results))} von {len(results)}:"
     await reply(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -476,7 +482,10 @@ def make_add_handler(entry: dict):
             hint = "" if rows else "\nDie Liste ist noch leer, sie füllt sich mit den ersten Alarmen."
             return await reply(
                 f"❌ Keine Treffer für „{html.escape(raw)}“ in der Liste.{hint}",
-                reply_markup=InlineKeyboardMarkup([_pattern_button(entry, "🔎 Trotzdem als Muster anlegen")]),
+                reply_markup=InlineKeyboardMarkup([
+                    _pattern_button(entry, "🔎 Trotzdem als Muster anlegen"),
+                    _cancel_row(for_key),
+                ]),
                 parse_mode="HTML",
             )
         if len(results) == 1:
@@ -570,6 +579,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.remove_sub_by_id(_db_path(context), chat_id, sub_id)
         return await query.edit_message_text("🗑️ Abonnement entfernt.")
 
+    if data.startswith("cancel:"):
+        for_key = data.split(":", 1)[1]
+        context.user_data.pop(f"search:{for_key}", None)
+        context.user_data.pop(f"term:{for_key}", None)
+        return await query.edit_message_text("✖️ Abgebrochen, es wurde nichts abonniert.")
+
     if data.startswith(("page:", "add:", "pat:")):
         kind, for_key, *rest = data.split(":", 2)
         entry = _entry_by_for(context, for_key)
@@ -625,6 +640,8 @@ async def users_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("❌", callback_data=f"acc:no:{row['user_id']}"),
             ])
 
+    if keyboard:
+        keyboard.append([InlineKeyboardButton("✔️ Schließen", callback_data="close_menu")])
     await update.message.reply_text(
         "\n".join(lines),
         parse_mode="HTML",

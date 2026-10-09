@@ -11,6 +11,8 @@ import re
 
 import yaml
 
+from template import DEFAULT_TEMPLATE, FIELD_NAME, template_from_fields, validate_template
+
 # Die mitgelieferte config.yaml liegt neben diesem Modul (im Image bzw. Repo).
 BUNDLED_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
 OPTIONAL_CONFIG_PATH = os.path.join("data", "config.yaml")
@@ -70,8 +72,9 @@ def deep_merge(base: dict, override: dict) -> dict:
     for key, value in override.items():
         if value is None:
             result.pop(key, None)
-        elif isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = deep_merge(result[key], value)
+        elif isinstance(value, dict):
+            # Auch neue Blöcke durchlaufen die Zusammenführung, damit ein 'null' darin nichts hinterlässt.
+            result[key] = deep_merge(result[key] if isinstance(result.get(key), dict) else {}, value)
         else:
             result[key] = value
     return result
@@ -150,8 +153,18 @@ def validate_config(config: dict, path: str) -> None:
         problems.append("files.db_path fehlt")
     if not config["mqtt"].get("host"):
         problems.append("mqtt.host fehlt (oder Umgebungsvariable MQTT_HOST setzen)")
-    if "notification_fields" in config and not isinstance(config["notification_fields"], list):
-        problems.append("notification_fields muss eine Liste sein")
+    block = config.get("notification")
+    if "notification" in config and not isinstance(block, dict):
+        problems.append("notification muss ein Block sein, z.B. 'notification:' mit 'template: |' darunter")
+    elif isinstance(block, dict) and "template" in block:
+        problems += [f"notification.template: {p}" for p in validate_template(block["template"])]
+    if "notification_fields" in config:
+        fields = config["notification_fields"]
+        if not isinstance(fields, list):
+            problems.append("notification_fields muss eine Liste sein")
+        else:
+            problems += [f"notification_fields: '{f}' ist kein gültiger Feldname (Buchstaben, Ziffern und _)"
+                         for f in fields if not isinstance(f, str) or not FIELD_NAME.match(f)]
     if not config["fields"]:
         problems.append("fields ist leer, es gäbe keine Befehle zum Abonnieren")
 
@@ -253,6 +266,17 @@ def load_config() -> dict:
     normalize_entries(config)
     resolve_csv_paths(config)
     return config
+
+
+def notification_template(config: dict) -> str:
+    """Die Vorlage der Alarm-Nachricht: 'notification.template', sonst - wie in früheren
+    Versionen - aus 'notification_fields' gebildet, sonst die Standard-Vorlage."""
+    block = config.get("notification")
+    if isinstance(block, dict) and block.get("template"):
+        return str(block["template"])
+    if config.get("notification_fields"):
+        return template_from_fields(config["notification_fields"])
+    return DEFAULT_TEMPLATE
 
 
 def build_command_map(entries: list) -> list:
