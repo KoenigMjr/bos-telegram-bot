@@ -51,8 +51,31 @@ fields:
     label: "Sub-RIC"
     match: exact
 
-# Welche Felder in der Alarm-Nachricht angezeigt werden (in dieser Reihenfolge).
-notification_fields: ["description", "message", "ric"]
+# Aufbau der Alarm-Nachricht. Ohne eigene Vorlage gilt diese (steckt im Programm und ist
+# bei jedem Update aktuell, hier nur zur Dokumentation):
+#
+#   notification:
+#     template: |
+#       🚨 <b>BOS-ALARM</b> 🚨
+#
+#       {DESCRIPTION_LIST|RIC_LIST}
+#       {MESSAGE}
+#
+#       <i>abonniert über: {MATCHED}</i>
+#
+# Eine eigene Vorlage kommt in data/config.yaml (siehe README, "Nachricht anpassen").
+# Platzhalter wie bei BOSWatch3 in Großbuchstaben, die Schreibweise des Feldes im Alarm ist egal:
+#   {FELD}         Wert eines Feldes aus dem Alarm, z.B. {MESSAGE}, {RIC}, {SUBRICTEXT}
+#   {FELD_LIST}    alle Werte eines Multicast-Alarms (Feld 'feld_list'), eine Zeile pro Wert;
+#                  leere und doppelte entfallen, ohne Liste gilt der einzelne Wert
+#   {MATCHED}      Name des passenden Abos
+#   {A|B}          Rückfall: der erste Platzhalter, der nicht leer ist
+#   {{ und }}      wörtliche geschweifte Klammern
+# Ist in einer Zeile jeder Platzhalter leer, entfällt die Zeile. Enthält eine Zeile genau eine
+# {..._LIST}, wird sie für jeden Eintrag wiederholt ("• {DESCRIPTION_LIST}"). Der Text der Vorlage
+# ist Telegram-HTML (<b>, <i>, <code> ...), ein '&' darin als &amp; schreiben.
+# Die ältere Einstellung 'notification_fields: [description, message, ric]' (Felder, je eine Zeile)
+# funktioniert weiter, 'notification.template' hat aber Vorrang.
 
 files:
   db_path: "data/bot_db.sqlite3"

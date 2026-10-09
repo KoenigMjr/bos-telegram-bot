@@ -15,5 +15,12 @@ fields:
   - for: subricText
     remove: true
 
-# Alarm-Nachricht ohne die RIC (ersetzt die Standardliste komplett)
-notification_fields: ["description", "message"]
+# Eigener Aufbau der Alarm-Nachricht (Platzhalter in Großbuchstaben, Erklärung im README).
+# Wichtig: mit '|' beginnen, sonst liest YAML die {Klammern} als etwas anderes.
+notification:
+  template: |
+    🚨 <b>{MESSAGE}</b>
+
+    • {DESCRIPTION_LIST|RIC_LIST}
+
+    <i>{MATCHED}</i>

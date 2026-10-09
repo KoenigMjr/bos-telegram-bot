@@ -10,6 +10,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 
 import database as db
 import main
+from template import DEFAULT_TEMPLATE
 
 CSV = "for,add,isRegex\n1234567,Rettungswagen Musterstadt A-Wehr,false\n^23456([0-9]{2})$,Feuerwehr Musterstadt,true\n"
 ENV = {"TELEGRAM_BOT_TOKEN": "123:dummy", "ADMIN_USERS": "1,2", "MQTT_HOST": "mqtt.local"}
@@ -80,6 +81,7 @@ class StartupTests(WiringTestCase):
         self.assertEqual(data["active_fields"], {"ric", "description", "message", "subricText"})
         self.assertEqual(data["field_labels"]["description"], "Fahrzeug / Wache")
         self.assertIsNone(data["last_payload"])
+        self.assertEqual(data["notification_template"], DEFAULT_TEMPLATE)
 
 
 class StartupErrorTests(WiringTestCase):

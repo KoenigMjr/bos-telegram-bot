@@ -145,6 +145,7 @@ So funktioniert die Suche:
 - Abonniert wird immer die **RIC** hinter dem Namen (bei Wache-Zeilen das
   RIC-Muster). Eine spätere Umbenennung des Namens in BOSWatch3 ändert daran
   nichts. In `/abo` steht trotzdem der Name.
+- Mit **„Abbrechen“** schließt du die Auswahl, ohne etwas zu abonnieren.
 - Die Auswahl sperrt nichts: Findet die Suche nichts, bietet der Bot
   **„Trotzdem als Muster anlegen“** an. Bei mehreren Treffern gibt es zusätzlich
   **„Alle mit … als Muster“**. Mit Platzhalter (`/description *wagen*`) wird
@@ -248,7 +249,8 @@ Wie Einträge zusammengeführt werden:
   bleibt erhalten. `null` entfernt eine einzelne Angabe (`add: null`).
 - Ein neues `for` hängt einen Eintrag an. `remove: true` löscht einen.
 - Nur dein `fields:` wird so zusammengeführt. Andere Blöcke wie `mqtt:` werden
-  Wert für Wert überlagert, `notification_fields:` ersetzt die Liste komplett.
+  Wert für Wert überlagert, `notification_fields:` ersetzt die Liste komplett (die Nachricht selbst stellst du mit
+  `notification.template` ein, siehe [Nachricht anpassen](#nachricht-anpassen)).
 
 Eine Vorlage mit Kommentaren liegt in
 [`examples/config.override.example.yaml`](examples/config.override.example.yaml),
@@ -265,6 +267,90 @@ alle Optionen stehen in der mitgelieferten [`config.yaml`](config.yaml).
 Die Reihenfolge, in der Werte gelten (später gewinnt): Standardwerte, deine
 `data/config.yaml`, Umgebungsvariablen.
 
+## Nachricht anpassen
+
+Der Aufbau der Alarm-Nachricht ist eine **Vorlage** mit Platzhaltern. Ohne eigene
+Einstellung gilt diese und liefert bei einem Multicast-Alarm zum Beispiel:
+
+```
+🚨 BOS-ALARM 🚨
+
+Lagedienst Musterstadt
+Rettungswagen Musterstadt
+TEST Beispieltext
+
+abonniert über: RIC: 1000011
+```
+
+Eine eigene Vorlage kommt in die `data/config.yaml` (Neustart nötig). Wichtig ist das `|`
+hinter `template:`, sonst liest YAML die geschweiften Klammern als etwas anderes:
+
+```yaml
+notification:
+  template: |
+    🚨 <b>BOS-ALARM</b> 🚨
+
+    {DESCRIPTION_LIST|RIC_LIST}
+    {MESSAGE}
+
+    <i>abonniert über: {MATCHED}</i>
+```
+
+Das ist zugleich die Standard-Vorlage. Die Platzhalter schreibst du wie bei BOSWatch3 in
+Großbuchstaben, die Schreibweise des Feldes im Alarm ist egal (`{SUBRICTEXT}` findet `subricText`).
+
+| Platzhalter        | Bedeutung |
+|--------------------|-----------|
+| `{FELD}`           | Wert eines Feldes aus dem Alarm, z.B. `{MESSAGE}`, `{RIC}` |
+| `{FELD_LIST}`      | alle Werte eines Multicast-Alarms (BOSWatch3-Feld `feld_list`), **eine Zeile pro Wert**. Leere und doppelte Einträge entfallen. Gibt es keine Liste, gilt der einzelne Wert |
+| `{MATCHED}`        | Name des passenden Abos |
+| `{A\|B}`           | Rückfall: der erste Platzhalter, der nicht leer ist, z.B. `{DESCRIPTION_LIST\|RIC_LIST}` |
+| `{{` und `}}`      | wörtliche geschweifte Klammern |
+
+So werden Zeilen behandelt:
+
+- **Leere Platzhalter:** Ist in einer Zeile jeder Platzhalter leer, entfällt die Zeile, auch
+  mit festem Text drumherum (`Kennung: {SUBRICTEXT}` verschwindet ohne Wert). Mehrere leere
+  Zeilen in Folge werden zu einer.
+- **Listen:** Enthält eine Zeile genau eine `{..._LIST}`, wird sie für jeden Eintrag
+  wiederholt, `• {DESCRIPTION_LIST}` ergibt also je Eintrag einen Aufzählungspunkt. Stehen mehrere
+  Listen in einer Zeile, werden ihre Einträge mit `, ` verbunden.
+- **Rückfall:** `{DESCRIPTION_LIST|RIC_LIST}` zeigt die Beschreibungen und nur dann die RICs,
+  wenn BOSWatch3 keine Beschreibung liefert. Ein Tippfehler im Feldnamen macht den Platzhalter
+  leer, die Zeile entfällt dann.
+- **Sicherheit:** Werte aus dem Alarm werden automatisch HTML-sicher gemacht. Der Text der Vorlage
+  selbst ist Telegram-HTML (`<b>`, `<i>`, `<code>`, `<a>` …). Ein `&` darin schreibst du als `&amp;`.
+  Ungültiges HTML, falsche Klammern oder unbekannte Tags meldet der Bot beim Start mit allen
+  Fehlern, statt Nachrichten zu verlieren. Ergibt die Vorlage überhaupt keinen Text, gilt die
+  Standard-Vorlage.
+
+Beispiele:
+
+```yaml
+notification:
+  template: |
+    🚨 <b>{MESSAGE}</b>
+
+    • {DESCRIPTION_LIST|RIC_LIST}
+
+    <i>{MATCHED}</i>
+```
+
+```yaml
+notification:
+  template: |
+    <b>{MESSAGE}</b>
+    {DESCRIPTION_LIST|RIC_LIST}
+    Ort: {STADTTEIL}
+```
+
+Das zweite Beispiel zeigt ein Feld, das etwa das BOSWatch3-Modul `descriptor` ergänzt. Fehlt es in einem
+Alarm, entfällt die Zeile. Welche Felder es gibt, zeigt `/lastraw`.
+
+Die ältere Einstellung `notification_fields: [description, message, ric]` (je Feld eine Zeile) gilt weiter,
+`notification.template` hat aber Vorrang. Namen, die selbst ein `, ` enthalten, zeigt die Nachricht auf
+zwei Zeilen, weil BOSWatch3 seine Listen mit demselben Trennzeichen bildet.
+
 ## Multicast-Alarme
 
 BOSWatch3 kann mehrere Empfänger eines Alarms zu einem Paket zusammenfassen
@@ -276,7 +362,8 @@ automatisch, ohne Konfiguration:
 - Ein Abo löst aus, wenn der Wert im Feld **oder** in der zugehörigen Liste
   vorkommt. Wer eine Wache abonniert hat, bekommt den Alarm auch, wenn sie nicht
   der zuletzt genannte Empfänger im Paket ist.
-- Bei mehreren Empfängern zeigt die Nachricht alle Einträge, je einer pro Zeile.
+- Bei mehreren Empfängern zeigt die Nachricht alle Einträge, je einer pro Zeile (Aufbau einstellbar, siehe
+  [Nachricht anpassen](#nachricht-anpassen)).
 - Pro Chat kommt **eine** Nachricht, auch wenn mehrere Abos passen. Unten steht
   "abonniert über: …" mit allen passenden Abos.
 
@@ -434,7 +521,7 @@ python -m unittest discover -s tests -t .
 ```
 
 Aufbau: `settings.py` (Konfiguration), `matching.py` (Muster und Abgleich),
-`knowledge.py` (CSV und gelernte Namen), `handlers.py` (Telegram-Befehle),
+`knowledge.py` (CSV und gelernte Namen), `template.py` (Aufbau der Alarm-Nachricht), `handlers.py` (Telegram-Befehle),
 `services/mqtt_service.py` (MQTT und Verteilung), `database.py` (SQLite).
 
 ## Für Maintainer: Image veröffentlichen

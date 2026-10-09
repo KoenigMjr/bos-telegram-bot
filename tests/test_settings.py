@@ -1,9 +1,11 @@
 import os
+import shutil
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import settings
+from template import DEFAULT_TEMPLATE, template_from_fields, validate_template
 
 
 def write(path, text):
@@ -35,7 +37,7 @@ class ConfigTestCase(unittest.TestCase):
         os.environ.update(env)
         return settings.load_config()
 
-    def fail(self, override=None, **env):
+    def expect_exit(self, override=None, **env):
         with self.assertRaises(SystemExit) as ctx:
             self.load(override, **env)
         return str(ctx.exception)
@@ -97,25 +99,25 @@ class MergeTests(ConfigTestCase):
         self.assertEqual(len(self.load("")["fields"]), 3)
 
     def test_old_dict_format_gives_helpful_error(self):
-        message = self.fail("fields:\n  ric:\n    mode: lookup\n")
+        message = self.expect_exit("fields:\n  ric:\n    mode: lookup\n")
         self.assertIn("neues Format", message)
         self.assertIn("for: ric", message)
 
     def test_entry_without_for_is_rejected(self):
-        self.assertIn("'for:'", self.fail("fields:\n  - label: X\n"))
+        self.assertIn("'for:'", self.expect_exit("fields:\n  - label: X\n"))
 
     def test_config_path_must_exist(self):
-        self.assertIn("nicht vorhandene Datei", self.fail(CONFIG_PATH="/gibt/es/nicht.yaml"))
+        self.assertIn("nicht vorhandene Datei", self.expect_exit(CONFIG_PATH="/gibt/es/nicht.yaml"))
 
     def test_config_path_is_used(self):
         write("woanders.yaml", 'mqtt:\n  topic: "x/y"\n')
         self.assertEqual(self.load(CONFIG_PATH="woanders.yaml")["mqtt"]["topic"], "x/y")
 
     def test_broken_yaml(self):
-        self.assertIn("kein gültiges YAML", self.fail("mqtt: [unclosed\n  x: {"))
+        self.assertIn("kein gültiges YAML", self.expect_exit("mqtt: [unclosed\n  x: {"))
 
     def test_list_instead_of_mapping(self):
-        self.assertIn("Zuordnung", self.fail("- a\n- b\n"))
+        self.assertIn("Zuordnung", self.expect_exit("- a\n- b\n"))
 
 
 class EnvironmentTests(ConfigTestCase):
@@ -157,7 +159,7 @@ class EnvironmentTests(ConfigTestCase):
 
 class ValidationTests(ConfigTestCase):
     def test_all_problems_reported_at_once(self):
-        message = self.fail(
+        message = self.expect_exit(
             "fields:\n"
             "  - for: ric\n    match: zufall\n    learn: vielleicht\n"
             "  - for: x\n    csv: a.csv\n"
@@ -166,10 +168,77 @@ class ValidationTests(ConfigTestCase):
             self.assertIn(expected, message)
 
     def test_missing_host(self):
-        self.assertIn("mqtt.host", self.fail('mqtt:\n  host: ""\n'))
+        self.assertIn("mqtt.host", self.expect_exit('mqtt:\n  host: ""\n'))
 
     def test_notification_fields_must_be_list(self):
-        self.assertIn("notification_fields", self.fail("notification_fields: x\n"))
+        self.assertIn("notification_fields", self.expect_exit("notification_fields: x\n"))
+
+
+class NotificationTemplateTests(ConfigTestCase):
+    def template(self, override=None, **env):
+        return settings.notification_template(self.load(override, **env))
+
+    def test_default_when_nothing_is_configured(self):
+        self.assertEqual(self.template(), DEFAULT_TEMPLATE)
+
+    def test_custom_template_from_data_config(self):
+        self.assertEqual(self.template("notification:\n  template: |\n    <b>{MESSAGE}</b>\n    {MATCHED}\n"),
+                         "<b>{MESSAGE}</b>\n{MATCHED}\n")
+
+    def test_old_notification_fields_still_work(self):
+        template = self.template('notification_fields: ["description", "ric"]\n')
+        self.assertEqual(template, template_from_fields(["description", "ric"]))
+        self.assertIn("{DESCRIPTION_LIST}\n{RIC_LIST}", template)
+
+    def test_template_wins_over_notification_fields(self):
+        template = self.template('notification_fields: ["ric"]\nnotification:\n  template: "{MESSAGE}"\n')
+        self.assertEqual(template, "{MESSAGE}")
+
+    def test_null_removes_a_custom_template(self):
+        self.assertEqual(self.template("notification:\n  template: null\n"), DEFAULT_TEMPLATE)
+
+    def test_rendered_example_override_from_the_repo(self):
+        os.makedirs("data", exist_ok=True)
+        shutil.copy(os.path.join(os.path.dirname(settings.BUNDLED_CONFIG), "examples", "config.override.example.yaml"),
+                    os.path.join("data", "config.yaml"))
+        template = settings.notification_template(settings.load_config())
+        self.assertIn("{DESCRIPTION_LIST|RIC_LIST}", template)
+        self.assertEqual(validate_template(template), [])
+
+    def test_unquoted_placeholders_give_a_helpful_error(self):
+        message = self.expect_exit("notification:\n  template: {MESSAGE}\n")
+        self.assertIn("notification.template", message)
+        self.assertIn("'|'", message)
+
+    def test_invalid_template_is_reported_with_all_problems(self):
+        message = self.expect_exit("notification:\n  template: |\n    <b>{MESSAGE\n    Alarm & Einsatz\n")
+        for expected in ("notification.template", "außerhalb eines Platzhalters", "&amp;", "nicht geschlossen"):
+            self.assertIn(expected, message)
+
+    def test_empty_template(self):
+        self.assertIn("leer", self.expect_exit('notification:\n  template: "  "\n'))
+
+    def test_notification_must_be_a_block(self):
+        self.assertIn("notification muss ein Block sein", self.expect_exit("notification: text\n"))
+
+    def test_invalid_field_name_in_notification_fields(self):
+        self.assertIn("kein gültiger Feldname", self.expect_exit('notification_fields: ["ric", "sub-ric"]\n'))
+
+    def test_the_documented_default_in_config_yaml_matches_the_code(self):
+        with open(settings.BUNDLED_CONFIG, encoding="utf-8") as f:
+            text = f.read()
+        documented = "\n".join(line[len("#       "):] if line.startswith("#       ") else ""
+                               for line in text.splitlines()[text.splitlines().index("#     template: |") + 1:][:6])
+        self.assertEqual(documented.strip(), DEFAULT_TEMPLATE)
+
+
+class NullInNewBlockTests(ConfigTestCase):
+    def test_null_inside_a_block_that_has_no_default_leaves_nothing_behind(self):
+        config = self.load("something_new:\n  a: 1\n  b: null\n")
+        self.assertEqual(config["something_new"], {"a": 1})
+
+    def test_null_removes_a_whole_block(self):
+        self.assertNotIn("mqtt", settings.deep_merge({"mqtt": {"a": 1}}, {"mqtt": None}))
 
 
 class CommandMapTests(ConfigTestCase):
