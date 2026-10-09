@@ -26,7 +26,7 @@ als Telegram-HTML und wird beim Start geprüft."""
 import html
 import re
 
-from matching import split_list
+from bos_telegram_bot.core.matching import split_list
 
 DEFAULT_TEMPLATE = """🚨 <b>BOS-ALARM</b> 🚨
 

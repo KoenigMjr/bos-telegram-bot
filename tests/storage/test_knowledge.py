@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import database as db
-import knowledge
+from bos_telegram_bot.storage import database as db
+from bos_telegram_bot.storage import knowledge
 from tests.helpers import make_entries
 
 CSV_ROWS = [

@@ -2,10 +2,8 @@ import os
 import tempfile
 import unittest
 
-import database as db
-import main
-import settings
-from tests.helpers import make_entries
+from bos_telegram_bot.storage import database as db
+from bos_telegram_bot import app as bot_app
 
 
 class DatabaseTests(unittest.TestCase):
@@ -39,7 +37,7 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(len(db.get_all_subs(self.path)), 1)
 
     def test_legacy_rename_table_is_applied_by_main(self):
-        self.assertEqual(main.LEGACY_FIELD_RENAMES, {"subric_text": "subricText"})
+        self.assertEqual(bot_app.LEGACY_FIELD_RENAMES, {"subric_text": "subricText"})
 
     def test_learned_pairs_upsert_and_lookup(self):
         db.upsert_learned(self.path, "ric", "1", "Alt")
@@ -54,16 +52,6 @@ class DatabaseTests(unittest.TestCase):
         db.add_sub(self.path, 2, "ric", "1", "A", False)
         db.remove_chat_subs(self.path, 1)
         self.assertEqual([s["chat_id"] for s in db.get_all_subs(self.path)], [2])
-
-
-class MenuTests(unittest.TestCase):
-    def test_menu_contains_every_command_with_description(self):
-        entries = make_entries()
-        menu = main.build_menu(settings.build_command_map(entries))
-        names = [c.command for c in menu]
-        self.assertEqual(names, ["start", "abo", "lastraw", "ric", "description", "message", "subrictext"])
-        self.assertTrue(all(1 <= len(c.description) <= 256 for c in menu))
-        self.assertIn("Fahrzeug / Wache suchen", [c.description for c in menu])
 
 
 if __name__ == "__main__":

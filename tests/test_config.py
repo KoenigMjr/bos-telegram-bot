@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import settings
-from template import DEFAULT_TEMPLATE, template_from_fields, validate_template
+from bos_telegram_bot import config as cfg
+from bos_telegram_bot.core.template import DEFAULT_TEMPLATE, template_from_fields, validate_template
 
 
 def write(path, text):
@@ -35,7 +35,7 @@ class ConfigTestCase(unittest.TestCase):
         if override is not None:
             write(os.path.join("data", "config.yaml"), override)
         os.environ.update(env)
-        return settings.load_config()
+        return cfg.load_config()
 
     def expect_exit(self, override=None, **env):
         with self.assertRaises(SystemExit) as ctx:
@@ -60,7 +60,7 @@ class DefaultsTests(ConfigTestCase):
         self.assertFalse(os.path.exists(os.path.join("data", "config.yaml")))
 
     def test_command_map(self):
-        names = [c["name"] for c in settings.build_command_map(self.load()["fields"])]
+        names = [c["name"] for c in cfg.build_command_map(self.load()["fields"])]
         self.assertEqual(names, ["ric", "description", "message", "subrictext"])
 
 
@@ -87,7 +87,7 @@ class MergeTests(ConfigTestCase):
     def test_null_removes_a_setting(self):
         config = self.load("fields:\n  - for: ric\n    add: null\n")
         self.assertNotIn("add", self.entry(config, "ric"))
-        self.assertEqual([c["name"] for c in settings.build_command_map(config["fields"])],
+        self.assertEqual([c["name"] for c in cfg.build_command_map(config["fields"])],
                          ["ric", "message", "subrictext"])
 
     def test_other_sections_are_merged(self):
@@ -176,7 +176,7 @@ class ValidationTests(ConfigTestCase):
 
 class NotificationTemplateTests(ConfigTestCase):
     def template(self, override=None, **env):
-        return settings.notification_template(self.load(override, **env))
+        return cfg.notification_template(self.load(override, **env))
 
     def test_default_when_nothing_is_configured(self):
         self.assertEqual(self.template(), DEFAULT_TEMPLATE)
@@ -199,9 +199,9 @@ class NotificationTemplateTests(ConfigTestCase):
 
     def test_rendered_example_override_from_the_repo(self):
         os.makedirs("data", exist_ok=True)
-        shutil.copy(os.path.join(os.path.dirname(settings.BUNDLED_CONFIG), "examples", "config.override.example.yaml"),
+        shutil.copy(os.path.join(os.path.dirname(cfg.BUNDLED_CONFIG), "examples", "config.override.example.yaml"),
                     os.path.join("data", "config.yaml"))
-        template = settings.notification_template(settings.load_config())
+        template = cfg.notification_template(cfg.load_config())
         self.assertIn("{DESCRIPTION_LIST|RIC_LIST}", template)
         self.assertEqual(validate_template(template), [])
 
@@ -225,7 +225,7 @@ class NotificationTemplateTests(ConfigTestCase):
         self.assertIn("kein gültiger Feldname", self.expect_exit('notification_fields: ["ric", "sub-ric"]\n'))
 
     def test_the_documented_default_in_config_yaml_matches_the_code(self):
-        with open(settings.BUNDLED_CONFIG, encoding="utf-8") as f:
+        with open(cfg.BUNDLED_CONFIG, encoding="utf-8") as f:
             text = f.read()
         documented = "\n".join(line[len("#       "):] if line.startswith("#       ") else ""
                                for line in text.splitlines()[text.splitlines().index("#     template: |") + 1:][:6])
@@ -238,7 +238,7 @@ class NullInNewBlockTests(ConfigTestCase):
         self.assertEqual(config["something_new"], {"a": 1})
 
     def test_null_removes_a_whole_block(self):
-        self.assertNotIn("mqtt", settings.deep_merge({"mqtt": {"a": 1}}, {"mqtt": None}))
+        self.assertNotIn("mqtt", cfg.deep_merge({"mqtt": {"a": 1}}, {"mqtt": None}))
 
 
 class CommandMapTests(ConfigTestCase):
@@ -248,7 +248,7 @@ class CommandMapTests(ConfigTestCase):
     def _collision(self, override):
         config = self.load(override)
         with self.assertRaises(SystemExit) as ctx:
-            settings.build_command_map(config["fields"])
+            cfg.build_command_map(config["fields"])
         return str(ctx.exception)
 
     def test_collision_between_fields(self):
@@ -257,24 +257,24 @@ class CommandMapTests(ConfigTestCase):
 
     def test_command_option_resolves_collision(self):
         config = self.load("fields:\n  - for: start\n    command: startwert\n")
-        self.assertIn("startwert", [c["name"] for c in settings.build_command_map(config["fields"])])
+        self.assertIn("startwert", [c["name"] for c in cfg.build_command_map(config["fields"])])
 
 
 class HelperTests(unittest.TestCase):
     def test_sanitize(self):
-        self.assertEqual(settings.sanitize_command_name("subricText"), "subrictext")
-        self.assertEqual(settings.sanitize_command_name("Mein-Feld.1"), "mein_feld_1")
-        self.assertEqual(settings.sanitize_command_name("1abc"), "f_1abc")
-        self.assertEqual(len(settings.sanitize_command_name("x" * 50)), 32)
+        self.assertEqual(cfg.sanitize_command_name("subricText"), "subrictext")
+        self.assertEqual(cfg.sanitize_command_name("Mein-Feld.1"), "mein_feld_1")
+        self.assertEqual(cfg.sanitize_command_name("1abc"), "f_1abc")
+        self.assertEqual(len(cfg.sanitize_command_name("x" * 50)), 32)
 
     def test_parse_admin_users(self):
         for raw, expected in [("1,2", [1, 2]), ("1, 2", [1, 2]), ("1;2;3", [1, 2, 3]), ("1\n2", [1, 2]),
                               ("5,5,6", [5, 6]), ("", []), ("  ,  ", []), ("-1001,42", [-1001, 42])]:
-            self.assertEqual(settings.parse_admin_users(raw), expected, raw)
+            self.assertEqual(cfg.parse_admin_users(raw), expected, raw)
 
     def test_parse_admin_users_invalid(self):
         with self.assertRaises(SystemExit) as ctx:
-            settings.parse_admin_users("1,abc")
+            cfg.parse_admin_users("1,abc")
         self.assertIn("'abc'", str(ctx.exception))
 
 

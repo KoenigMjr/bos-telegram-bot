@@ -1,10 +1,10 @@
 import unittest
 from unittest.mock import patch
 
-import database as db
-from matching import wildcard_to_regex
-from services import mqtt_service as ms
-from template import DEFAULT_TEMPLATE, template_from_fields
+from bos_telegram_bot.storage import database as db
+from bos_telegram_bot.core.matching import wildcard_to_regex
+from bos_telegram_bot.mqtt import dispatch
+from bos_telegram_bot.core.template import DEFAULT_TEMPLATE, template_from_fields
 from tests.helpers import Env
 
 NOTIFY = ["description", "message", "ric"]
@@ -18,7 +18,7 @@ class DistributionTests(unittest.IsolatedAsyncioTestCase):
     async def alarm(self, payload):
         self.env.bot.sent.clear()
         app = type("App", (), {"bot": self.env.bot})()
-        await ms.handle_payload(app, self.env.db_path, self.env.context.bot_data["active_fields"], TEMPLATE, payload)
+        await dispatch.handle_payload(app, self.env.db_path, self.env.context.bot_data["active_fields"], TEMPLATE, payload)
         return {m["chat_id"]: m["text"] for m in self.env.bot.sent}
 
     def sub(self, chat, field, target, alias="Alias", regex=False):
@@ -89,7 +89,7 @@ class TemplateInDistributionTests(unittest.IsolatedAsyncioTestCase):
         env = Env(self)
         db.add_sub(env.db_path, 11, "ric", "1000011", "RIC: 1000011", False)
         app = type("App", (), {"bot": env.bot})()
-        await ms.handle_payload(app, env.db_path, env.context.bot_data["active_fields"], template,
+        await dispatch.handle_payload(app, env.db_path, env.context.bot_data["active_fields"], template,
                                 payload or self.MULTICAST)
         return env.bot.sent[0]["text"]
 
@@ -116,13 +116,13 @@ class TemplateInDistributionTests(unittest.IsolatedAsyncioTestCase):
 
 class NotificationTextTests(unittest.TestCase):
     def test_multicast_shows_every_entry_on_its_own_line(self):
-        text = ms.build_notification_text(DistributionTests.MULTICAST, TEMPLATE, ["Wache"])
+        text = dispatch.build_notification_text(DistributionTests.MULTICAST, TEMPLATE, ["Wache"])
         lines = text.split("\n")
         for expected in ("Wache Musterstadt", "Rettungswagen Musterstadt", "RD 1 - Test", "1000001", "1000002"):
             self.assertIn(expected, lines)
 
     def test_single_alarm_and_html_escaping(self):
-        text = ms.build_notification_text({"description": "A & B <x>", "ric": "1"}, TEMPLATE, ["Alias <b>"])
+        text = dispatch.build_notification_text({"description": "A & B <x>", "ric": "1"}, TEMPLATE, ["Alias <b>"])
         self.assertIn("A &amp; B &lt;x&gt;", text)
         self.assertIn("abonniert über: Alias &lt;b&gt;", text)
 
@@ -130,14 +130,14 @@ class NotificationTextTests(unittest.TestCase):
 class LearningIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_learn_payload_fills_known_rows(self):
         env = Env(self)
-        await ms.learn_payload(env.db_path, env.entries, DistributionTests.MULTICAST)
+        await dispatch.learn_payload(env.db_path, env.entries, DistributionTests.MULTICAST)
         learned = {r["for_value"]: r["add_value"] for r in db.list_learned(env.db_path, "ric")}
         self.assertEqual(learned, {"1000002": "Rettungswagen Musterstadt", "1000001": "Wache Musterstadt"})
 
     async def test_learning_errors_never_propagate(self):
         env = Env(self)
         with patch("builtins.print") as log:
-            await ms.learn_payload("/gibt/es/nicht/db.sqlite3", env.entries, {"ric": "1", "description": "A"})
+            await dispatch.learn_payload("/gibt/es/nicht/db.sqlite3", env.entries, {"ric": "1", "description": "A"})
         self.assertIn("[Lernen] Fehler", log.call_args[0][0])
 
 

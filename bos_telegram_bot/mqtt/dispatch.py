@@ -1,12 +1,10 @@
+"""Verteilung eines Alarms an die Chats, deren Abos passen."""
+
 import asyncio
-import json
 
-import aiomqtt
-
-import database as db
-import knowledge
-from matching import candidate_values, match_sub
-from template import render
+from bos_telegram_bot.core.matching import candidate_values, match_sub
+from bos_telegram_bot.core.template import render
+from bos_telegram_bot.storage import database as db, knowledge
 
 
 def build_notification_text(payload: dict, template: str, matched_aliases: list) -> str:
@@ -67,48 +65,3 @@ async def learn_payload(db_path: str, entries: list, payload: dict) -> None:
         await asyncio.to_thread(knowledge.learn_from_payload, db_path, entries, payload)
     except Exception as e:
         print(f"[Lernen] Fehler (wird ignoriert): {e}")
-
-
-async def start_mqtt_listener(app):
-    config = app.bot_data["config"]
-    mqtt_conf = config["mqtt"]
-    db_path = config["files"]["db_path"]
-    entries = app.bot_data["entries"]
-    active_fields = app.bot_data["active_fields"]
-    template = app.bot_data["notification_template"]
-
-    while True:
-        try:
-            async with aiomqtt.Client(
-                hostname=mqtt_conf["host"],
-                port=mqtt_conf["port"],
-                username=mqtt_conf.get("username") or None,
-                password=mqtt_conf.get("password") or None,
-            ) as client:
-                await client.subscribe(mqtt_conf["topic"])
-                print(f"[MQTT] Verbunden und lausche auf Topic: {mqtt_conf['topic']}")
-
-                async for message in client.messages:
-                    raw = message.payload.decode(errors="replace").strip()
-                    if not raw:
-                        continue
-
-                    try:
-                        payload = json.loads(raw)
-                    except json.JSONDecodeError:
-                        # Home-Assistant-Discovery-Configs oder andere
-                        # Nicht-Alarm-Nachrichten auf demselben Topic-Ast.
-                        continue
-
-                    if not isinstance(payload, dict):
-                        continue
-
-                    # Keine eigene Dedupe-/Filterlogik hier: BOSWatch3 liefert
-                    # bereits fertig aufbereitete, einzeln zustellbare Alarme.
-                    app.bot_data["last_payload"] = payload
-                    await handle_payload(app, db_path, active_fields, template, payload)
-                    await learn_payload(db_path, entries, payload)
-
-        except aiomqtt.MqttError as e:
-            print(f"[MQTT Error] {e}. Verbinde neu in 5 Sekunden...")
-            await asyncio.sleep(5)
