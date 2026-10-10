@@ -12,6 +12,7 @@ import re
 
 import yaml
 
+from bos_telegram_bot.core.delivery import DEFAULT_SECONDS as DEFAULT_REMEMBER_SECONDS
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE, FIELD_NAME, template_from_fields, validate_template
 from bos_telegram_bot.logs import LEVELS, normalize_level
 
@@ -158,6 +159,13 @@ def validate_config(config: dict, path: str) -> None:
         problems.append("logging muss ein Block sein, z.B. 'logging:' mit 'level: INFO' darunter")
     elif isinstance(log_block, dict) and "level" in log_block and normalize_level(log_block["level"]) is None:
         problems.append(f"logging.level muss eines von {', '.join(LEVELS)} sein (ist '{log_block['level']}')")
+    duplicates = config.get("duplicates")
+    if "duplicates" in config and not isinstance(duplicates, dict):
+        problems.append("duplicates muss ein Block sein, z.B. 'duplicates:' mit 'remember_seconds: 300' darunter")
+    elif isinstance(duplicates, dict) and "remember_seconds" in duplicates:
+        seconds = duplicates["remember_seconds"]
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
+            problems.append(f"duplicates.remember_seconds muss eine Zahl von 0 an sein (0 = abgeschaltet), ist '{seconds}'")
     if not config["files"].get("db_path"):
         problems.append("files.db_path fehlt")
     if not config["mqtt"].get("host"):
@@ -278,6 +286,8 @@ def load_config() -> dict:
     validate_config(config, source)
     log_settings = config.setdefault("logging", {})
     log_settings["level"] = normalize_level(log_settings.get("level", "INFO"))
+    duplicate_settings = config.setdefault("duplicates", {})
+    duplicate_settings.setdefault("remember_seconds", DEFAULT_REMEMBER_SECONDS)
     normalize_entries(config)
     resolve_csv_paths(config)
     return config

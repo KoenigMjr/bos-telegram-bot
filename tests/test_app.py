@@ -14,6 +14,7 @@ from bos_telegram_bot.storage import database as db
 from bos_telegram_bot import app as bot_app
 from bos_telegram_bot import config as cfg
 from bos_telegram_bot import logs
+from bos_telegram_bot.core.delivery import DeliveryMemory
 from tests.helpers import make_entries
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE
 
@@ -174,6 +175,38 @@ class LoggingStartupTests(WiringTestCase):
         self.output.seek(0)
         self.start()
         self.assertEqual(len([line for line in self.lines() if "gestartet" in line]), 1)
+
+
+class DuplicateDetectionStartupTests(WiringTestCase):
+    def write_config(self, text):
+        with open("data/config.yaml", "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_a_memory_for_duplicate_alarms_is_created_by_default(self):
+        memory = self.start().bot_data["delivered"]
+        self.assertIsInstance(memory, DeliveryMemory)
+        self.assertEqual(memory.ttl, 300)
+
+    def test_the_time_comes_from_the_config(self):
+        self.write_config("duplicates:\n  remember_seconds: 45\n")
+        self.assertEqual(self.start().bot_data["delivered"].ttl, 45)
+
+    def test_zero_means_no_memory_at_all(self):
+        self.write_config("duplicates:\n  remember_seconds: 0\n")
+        self.assertIsNone(self.start().bot_data["delivered"])
+
+    def test_debug_tells_what_is_active(self):
+        self.start(LOG_LEVEL="debug")
+        self.assertIn("Doppelte Alarme: werden 300 s lang erkannt", self.output.getvalue())
+
+    def test_debug_tells_when_it_is_off(self):
+        self.write_config("duplicates:\n  remember_seconds: 0\n")
+        self.start(LOG_LEVEL="debug")
+        self.assertIn("Doppelte Alarme: Erkennung abgeschaltet", self.output.getvalue())
+
+    def test_info_stays_quiet_about_it(self):
+        self.start()
+        self.assertNotIn("Doppelte Alarme", self.output.getvalue())
 
 
 class StartupErrorTests(WiringTestCase):

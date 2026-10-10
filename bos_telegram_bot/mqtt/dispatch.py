@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 
+from bos_telegram_bot.core.delivery import alarm_key
 from bos_telegram_bot.core.matching import candidate_values, match_sub, split_list
 from bos_telegram_bot.core.template import render
 from bos_telegram_bot.storage import database as db, knowledge
@@ -69,9 +70,16 @@ async def _notify_subscriber(app, chat_id: int, text: str) -> bool:
     return True
 
 
-async def handle_payload(app, db_path: str, active_fields: set, template: str, payload: dict) -> None:
-    """Verteilt einen Alarm an alle Chats, deren Abos passen."""
+async def handle_payload(app, db_path: str, active_fields: set, template: str, payload: dict, delivered=None) -> None:
+    """Verteilt einen Alarm an alle Chats, deren Abos passen.
+
+    delivered ist das Gedächtnis für doppelte Alarme (core/delivery.py). Ohne es wird jede Nachricht
+    behandelt, als wäre sie neu. Mit ihm geht ein Alarm an jeden Chat höchstens einmal raus, auch wenn
+    er mehrfach eintrifft; nur Chats, bei denen das Senden scheiterte, werden beim nächsten Mal erneut
+    versucht."""
     label = describe_alarm(payload)
+    key = alarm_key(payload) if delivered is not None else None
+    is_new = delivered.register(key) if delivered is not None else True
 
     # DB-Zugriff ist synchron (sqlite3) -> in Thread auslagern, damit der
     # Event-Loop bei jedem Alarm nicht blockiert.
@@ -104,17 +112,39 @@ async def handle_payload(app, db_path: str, active_fields: set, template: str, p
             aliases.append(resolved)
 
     if not matches:
-        log.info("Alarm %s: kein passendes Abo", label)
+        if is_new:
+            log.info("Alarm %s: kein passendes Abo", label)
+        else:
+            log.debug("Alarm %s: Wiederholung, weiterhin kein passendes Abo", label)
         return
 
-    texts = {chat_id: build_notification_text(payload, template, aliases) for chat_id, aliases in matches.items()}
+    # Chats, an die dieser Alarm schon ging (Kopie des Alarms, zweites Multicast-Topic), werden übersprungen.
+    pending = {}
+    for chat_id, aliases in matches.items():
+        if delivered is not None and delivered.is_delivered(key, chat_id):
+            log.debug("Chat %s: Alarm schon zugestellt, übersprungen", chat_id)
+        else:
+            pending[chat_id] = aliases
+    if not pending:
+        log.debug("Alarm %s: Wiederholung, alle %d Chat(s) schon beliefert", label, len(matches))
+        return
+
+    texts = {chat_id: build_notification_text(payload, template, aliases) for chat_id, aliases in pending.items()}
     for chat_id, text in texts.items():
         log.debug("Nachricht an Chat %s:\n%s", chat_id, text)
 
-    results = await asyncio.gather(*(_notify_subscriber(app, chat_id, text) for chat_id, text in texts.items()))
+    chats = list(texts)
+    results = await asyncio.gather(*(_notify_subscriber(app, chat_id, texts[chat_id]) for chat_id in chats))
+    for chat_id, accepted in zip(chats, results):
+        if accepted and delivered is not None:
+            delivered.mark_delivered(key, chat_id)       # nur was Telegram angenommen hat, gilt als zugestellt
+
     sent = sum(results)
-    log.log(logging.INFO if sent == len(texts) else logging.WARNING,
-            "Alarm %s: %d Abo(s) in %d Chat(s), gesendet %d/%d", label, matched_subs, len(texts), sent, len(texts))
+    level = logging.INFO if sent == len(chats) else logging.WARNING
+    if is_new:
+        log.log(level, "Alarm %s: %d Abo(s) in %d Chat(s), gesendet %d/%d", label, matched_subs, len(chats), sent, len(chats))
+    else:
+        log.log(level, "Alarm %s: Wiederholung, %d Chat(s) noch offen, gesendet %d/%d", label, len(chats), sent, len(chats))
 
 
 async def learn_payload(db_path: str, entries: list, payload: dict) -> None:

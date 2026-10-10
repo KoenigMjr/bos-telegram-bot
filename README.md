@@ -373,6 +373,33 @@ Einschränkung: Enthält ein Name selbst ein ", ", teilt die Nachricht ihn auf
 zwei Zeilen auf, weil BOSWatch3 die Liste mit demselben Trennzeichen
 zusammensetzt. Der Abo-Treffer funktioniert trotzdem.
 
+## Doppelte Alarme
+
+Derselbe Alarm kann mehrfach beim Bot ankommen, ohne dass etwas kaputt ist:
+
+- Eine **Automation** (z.B. in Home Assistant, die für jede RIC einen Sensor anlegt) veröffentlicht den
+  Alarm kurz nach dem Original noch einmal auf dasselbe Topic.
+- Ein **Multicast mit mehreren Empfängern** wird auf das Topic jedes Empfängers veröffentlicht.
+
+Beides zusammen ergibt bei zwei Empfängern vier Nachrichten für einen einzigen Einsatz. Der Bot erkennt das am
+Zeitstempel des Alarms (`timestamp_list`, sonst `timestamp`), der in allen Kopien gleich ist, und stellt den
+Alarm **an jeden Chat nur einmal** zu.
+
+- Was Telegram angenommen hat, gilt als zugestellt. Scheitert das Senden (z.B. Zeitüberschreitung), bekommt
+  dieser Chat die **nächste Kopie** des Alarms als neuen Versuch. Chats, bei denen es klappte, nicht noch einmal.
+- Kommt nur die Kopie an und das Original fehlt, wird die Kopie ganz normal zugestellt. Es geht nichts verloren.
+- Wiederholungen erscheinen nur im DEBUG-Log, ändern `/lastraw` nicht und werden nicht noch einmal gelernt.
+- Hat ein Alarm keinen Zeitstempel, wird er nie als doppelt erkannt. Lieber doppelt als verloren.
+- Das Gedächtnis liegt nur im Speicher. Nach einem Neustart beginnt es leer.
+
+```yaml
+# data/config.yaml
+duplicates:
+  remember_seconds: 300    # Standard. 0 = nicht erkennen, jede Nachricht zustellen
+```
+
+Kommen Alarme mehr als `remember_seconds` später noch einmal an, gelten sie als neu.
+
 ## Benutzer und Admins
 
 Der Bot hat genau **einen** Token (`TELEGRAM_BOT_TOKEN`). Beim Zugriff gibt es
@@ -471,6 +498,10 @@ sein.
 
 Außerdem steht im INFO-Log, wer wann Abos angelegt oder entfernt hat und wer von einem Admin freigeschaltet,
 abgelehnt oder gesperrt wurde (jeweils mit Telegram-ID, ohne Namen).
+
+Trifft derselbe Alarm mehrfach ein (siehe [Doppelte Alarme](#doppelte-alarme)), steht nur die erste Zeile im
+INFO-Log. Die Wiederholungen erscheinen im DEBUG-Log, nur ein Neuversuch nach einem Fehler hat wieder eine
+INFO-Zeile (`Alarm …: Wiederholung, 1 Chat(s) noch offen, gesendet 1/1`).
 
 **Der Alarmtext steht bewusst nie im INFO-Log**, er kann Adressen und andere persönliche Angaben enthalten.
 Die Alarmzeile nennt nur RIC und Name.
@@ -590,6 +621,7 @@ bos_telegram_bot/
   logs.py                  Logging: Format, Pegel, Schwärzen des Tokens
   core/                    reine Logik, ohne Telegram und ohne Datenbank
     matching.py              Muster, Platzhalter, "Zahl+", Abgleich mit Multicast-Listen
+    delivery.py              erkennt doppelte Alarme, merkt sich die schon belieferten Chats
     template.py              Aufbau der Alarm-Nachricht
   storage/
     database.py              SQLite: Abos, Benutzer, gelernte Namen

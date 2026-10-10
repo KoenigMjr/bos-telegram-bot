@@ -6,6 +6,7 @@ import logging
 
 import aiomqtt
 
+from bos_telegram_bot.core.delivery import alarm_key
 from bos_telegram_bot.mqtt.dispatch import handle_payload, learn_payload
 
 log = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ async def start_mqtt_listener(app):
     entries = app.bot_data["entries"]
     active_fields = app.bot_data["active_fields"]
     template = app.bot_data["notification_template"]
+    delivered = app.bot_data.get("delivered")      # Gedächtnis für doppelte Alarme, None = abgeschaltet
 
     while True:
         try:
@@ -59,12 +61,25 @@ async def start_mqtt_listener(app):
                         log.debug("JSON ist kein Objekt, ignoriert (Topic %s)", message.topic)
                         continue
 
-                    # Keine eigene Dedupe-/Filterlogik hier: BOSWatch3 liefert
-                    # bereits fertig aufbereitete, einzeln zustellbare Alarme.
-                    app.bot_data["last_payload"] = payload
-                    await handle_payload(app, db_path, active_fields, template, payload)
-                    await learn_payload(db_path, entries, payload)
+                    # Dieselbe Nachricht kann mehrfach eintreffen (siehe core/delivery.py). Eine Wiederholung
+                    # ändert weder /lastraw noch muss sie noch einmal gelernt werden.
+                    is_new = not (delivered is not None and delivered.knows(alarm_key(payload)))
+                    if is_new:
+                        app.bot_data["last_payload"] = payload
+
+                    try:
+                        await handle_payload(app, db_path, active_fields, template, payload, delivered)
+                        if is_new:
+                            await learn_payload(db_path, entries, payload)
+                    except Exception:
+                        # Ein Fehler bei einem Alarm darf die Schleife nicht beenden: Der Bot würde sonst
+                        # weiter auf Befehle antworten, aber keinen Alarm mehr zustellen, ohne dass es auffällt.
+                        log.exception("Alarm konnte nicht verarbeitet werden (Topic %s)", message.topic)
 
         except aiomqtt.MqttError as e:
             log.warning("MQTT-Verbindung gestört: %s. Neuer Versuch in 5 s", e)
+            await asyncio.sleep(5)
+        except Exception:
+            # Auch ein unerwarteter Fehler (z.B. beim Verbinden) darf die Schleife nicht beenden.
+            log.exception("Unerwarteter Fehler bei der MQTT-Verbindung. Neuer Versuch in 5 s")
             await asyncio.sleep(5)

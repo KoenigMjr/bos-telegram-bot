@@ -10,6 +10,7 @@ from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandle
 from bos_telegram_bot import config as cfg
 from bos_telegram_bot import logs
 from bos_telegram_bot.chat import admin, buttons, fields, overview, prompts
+from bos_telegram_bot.core.delivery import DeliveryMemory
 from bos_telegram_bot.mqtt.listener import start_mqtt_listener
 from bos_telegram_bot.storage import database as db
 from bos_telegram_bot.storage import knowledge
@@ -99,6 +100,11 @@ def main():
     for entry in entries:
         entry["csv_rows"] = knowledge.load_csv(entry.get("csv")) if entry.get("add") else []
 
+    remember_seconds = config["duplicates"]["remember_seconds"]
+    delivered = DeliveryMemory(remember_seconds) if remember_seconds > 0 else None
+    log.debug("Doppelte Alarme: %s",
+              f"werden {remember_seconds:g} s lang erkannt" if delivered else "Erkennung abgeschaltet")
+
     app = ApplicationBuilder().token(token).post_init(post_init).build()
     app.bot_data.update({
         "config": config,
@@ -111,6 +117,7 @@ def main():
             **{e["add"]: e["add_label"] for e in entries if e.get("add")},
         },
         "last_payload": None,
+        "delivered": delivered,
         "notification_template": cfg.notification_template(config),
     })
 
