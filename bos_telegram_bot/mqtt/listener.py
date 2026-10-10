@@ -24,6 +24,7 @@ def log_incoming(topic, qos, retain, raw: str) -> None:
 async def start_mqtt_listener(app):
     config = app.bot_data["config"]
     mqtt_conf = config["mqtt"]
+    qos = mqtt_conf.get("qos", 0)
     db_path = config["files"]["db_path"]
     entries = app.bot_data["entries"]
     active_fields = app.bot_data["active_fields"]
@@ -38,9 +39,9 @@ async def start_mqtt_listener(app):
                 username=mqtt_conf.get("username") or None,
                 password=mqtt_conf.get("password") or None,
             ) as client:
-                await client.subscribe(mqtt_conf["topic"])
-                log.info("Verbunden mit MQTT-Broker %s:%s, lausche auf Topic %s",
-                         mqtt_conf["host"], mqtt_conf["port"], mqtt_conf["topic"])
+                await client.subscribe(mqtt_conf["topic"], qos=qos)
+                log.info("Verbunden mit MQTT-Broker %s:%s, lausche auf Topic %s (QoS %s)",
+                         mqtt_conf["host"], mqtt_conf["port"], mqtt_conf["topic"], qos)
 
                 async for message in client.messages:
                     raw = message.payload.decode(errors="replace").strip()

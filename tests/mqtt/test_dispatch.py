@@ -165,6 +165,44 @@ class DescribeAlarmTests(unittest.TestCase):
         self.assertLessEqual(len(label), len("1 ()") + dispatch.MAX_NAME_LENGTH)
         self.assertTrue(label.endswith("…)"))
 
+    def test_names_are_never_cut_in_the_middle_the_rest_is_counted(self):
+        names = ["A" * 25, "B" * 25, "C" * 25, "D" * 25]
+        label = dispatch.describe_alarm({"ric": "1", "description_list": ", ".join(names)})
+        self.assertEqual(label, f"1 ({'A' * 25}, {'B' * 25} +2 weitere)")
+
+    def test_a_name_that_fits_exactly_is_still_shown(self):
+        limit = dispatch.MAX_NAME_LENGTH
+        fits = ["A" * 30, "B" * (limit - 32)]                       # 30 + 2 + (limit - 32) = limit
+        self.assertEqual(dispatch.describe_alarm({"ric": "1", "description_list": ", ".join(fits)}), f"1 ({fits[0]}, {fits[1]})")
+
+    def test_one_character_more_and_the_name_moves_to_the_count(self):
+        limit = dispatch.MAX_NAME_LENGTH
+        names = ["A" * 30, "B" * (limit - 31)]                      # ein Zeichen zu lang
+        self.assertEqual(dispatch.describe_alarm({"ric": "1", "description_list": ", ".join(names)}), f"1 ({'A' * 30} +1 weitere)")
+
+    def test_a_single_name_that_is_too_long_is_shortened_and_the_others_counted(self):
+        label = dispatch.describe_alarm({"ric": "1", "description_list": "A" * 100 + ", Kurz"})
+        self.assertEqual(label, f"1 ({'A' * (dispatch.MAX_NAME_LENGTH - 1)}… +1 weitere)")
+
+    def test_names_with_brackets_never_leave_a_bracket_open(self):
+        names = [f"FW0{i} Nord (Wache-AB)" for i in range(1, 8)]
+        label = dispatch.describe_alarm({"ric_list": ", ".join(str(i) for i in range(1, 8)), "description_list": ", ".join(names)})
+        self.assertEqual(label.count("("), label.count(")"), label)
+        self.assertTrue(label.endswith(" weitere)"), label)
+
+    def test_the_first_name_is_always_shown(self):
+        self.assertTrue(dispatch.describe_alarm({"ric": "1", "description_list": "Erster, Zweiter"}).startswith("1 (Erster"))
+
+    def test_the_count_of_the_rest_ignores_duplicates_and_names_equal_to_a_ric(self):
+        names = ["A" * 40, "A" * 40, "1", "B" * 40, "C" * 40]       # nach dem Zusammenfassen: A, B, C
+        label = dispatch.describe_alarm({"ric": "1", "description_list": ", ".join(names)})
+        self.assertEqual(label, f"1 ({'A' * 40} +2 weitere)")
+
+    def test_the_label_stays_short_even_with_many_long_names(self):
+        label = dispatch.describe_alarm({"ric_list": "1, 2, 3", "description_list": ", ".join("N" * 48 + f"{i:02d}" for i in range(30))})
+        self.assertLessEqual(len(label), len("1, 2, 3 ()") + dispatch.MAX_NAME_LENGTH + len(" +99 weitere"))
+        self.assertIn("+29 weitere", label)
+
     def test_duplicate_entries_collapse(self):
         self.assertEqual(dispatch.describe_alarm({"ric_list": "1, 1, 2", "description_list": "A, A"}), "1, 2 (A)")
 
@@ -253,6 +291,26 @@ class AlarmLogTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Nachricht an Chat 11:", output)
         self.assertIn("Musterstraße 5", output)     # der volle Text ist nur auf DEBUG im Log
         self.assertRegex(output, r"Chat 11: gesendet in \d+\.\d\d s")
+
+    async def test_the_message_text_is_a_single_formatted_log_line(self):
+        """Die fertige Nachricht ist mehrzeilig. Im Log, wie Docker es sieht, muss sie trotzdem eine Zeile sein."""
+        import contextlib
+        import io
+
+        from bos_telegram_bot import logs
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            logs.setup_logging("DEBUG")
+            self.addCleanup(logs.reset_logging)
+            app = type("App", (), {"bot": self.env.bot})()
+            await dispatch.handle_payload(app, self.env.db_path, self.env.context.bot_data["active_fields"],
+                                          DEFAULT_TEMPLATE, self.ALARM)
+        lines = [line for line in out.getvalue().splitlines() if line.strip()]
+        message = [line for line in lines if "Nachricht an Chat 11:" in line]
+        self.assertEqual(len(message), 1)
+        self.assertIn("Wache Nord ⏎ TEST Beispieltext (Musterstraße 5)", message[0])
+        self.assertTrue(all(line[:4].isdigit() for line in lines), [line for line in lines if not line[:4].isdigit()])
+
 
     async def test_debug_mentions_subscriptions_of_removed_fields(self):
         db.add_sub(self.env.db_path, 33, "altes_feld", "x", "alt", False)

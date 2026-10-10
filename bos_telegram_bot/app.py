@@ -84,8 +84,8 @@ def main():
 
     config = cfg.load_config()
     logs.set_level(config["logging"]["level"])
-    log.debug("Konfiguration: MQTT %s:%s, Topic %s, Datenbank %s",
-              config["mqtt"]["host"], config["mqtt"]["port"], config["mqtt"]["topic"], config["files"]["db_path"])
+    log.debug("Konfiguration: MQTT %s:%s, Topic %s, QoS %s, Datenbank %s", config["mqtt"]["host"], config["mqtt"]["port"],
+              config["mqtt"]["topic"], config["mqtt"]["qos"], config["files"]["db_path"])
     entries = config["fields"]
     command_map = cfg.build_command_map(entries)
 
@@ -149,7 +149,7 @@ def main():
     app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, prompts.prompt_reply_handler))
 
     notification = app.bot_data["notification_template"]
-    log.debug("Nachrichtenvorlage:\n%s", notification)
+    log.debug("Nachrichtenvorlage: %s", notification)
     log.info("BOS-Telegram-Bot gestartet: %d Admin(s), Befehle %s, Log-Level %s", len(admins),
              ", ".join("/" + c["name"] for c in command_map), config["logging"]["level"])
     app.run_polling()

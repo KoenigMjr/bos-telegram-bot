@@ -22,6 +22,24 @@ def _distinct(values) -> list:
     return result
 
 
+def _limited_names(names: list) -> str:
+    """Ganze Namen, solange sie in MAX_NAME_LENGTH Zeichen passen. Den Rest zählt die Angabe '+3 weitere',
+    so wird nie mitten in einem Namen abgeschnitten (und keine Klammer bleibt offen). Nur ein einzelner
+    Name, der allein zu lang ist, wird gekürzt."""
+    shown, length = [], 0
+    for name in names:
+        needed = len(name) + (2 if shown else 0)           # 2 Zeichen für das ', ' davor
+        if shown and length + needed > MAX_NAME_LENGTH:
+            break
+        shown.append(name)
+        length += needed
+    text = ", ".join(shown)
+    if len(text) > MAX_NAME_LENGTH:
+        text = text[:MAX_NAME_LENGTH - 1] + "…"
+    rest = len(names) - len(shown)
+    return text + (f" +{rest} weitere" if rest else "")
+
+
 def describe_alarm(payload: dict) -> str:
     """Kurze Kennzeichnung eines Alarms für das Log: RIC(s) und Name(n).
 
@@ -41,9 +59,7 @@ def describe_alarm(payload: dict) -> str:
     names = [name for name in names if name not in idents]   # unbekannte RIC trägt die RIC als Namen
 
     label = ", ".join(idents[:3]) + (f" +{len(idents) - 3}" if len(idents) > 3 else "")
-    text = ", ".join(names)
-    if len(text) > MAX_NAME_LENGTH:
-        text = text[:MAX_NAME_LENGTH - 1] + "…"
+    text = _limited_names(names)
     if text:
         label += f" ({text})"
     return label or "ohne Kennung"
@@ -131,7 +147,7 @@ async def handle_payload(app, db_path: str, active_fields: set, template: str, p
 
     texts = {chat_id: build_notification_text(payload, template, aliases) for chat_id, aliases in pending.items()}
     for chat_id, text in texts.items():
-        log.debug("Nachricht an Chat %s:\n%s", chat_id, text)
+        log.debug("Nachricht an Chat %s: %s", chat_id, text)
 
     chats = list(texts)
     results = await asyncio.gather(*(_notify_subscriber(app, chat_id, texts[chat_id]) for chat_id in chats))

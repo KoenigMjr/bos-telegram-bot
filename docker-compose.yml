@@ -33,6 +33,8 @@ services:
       MQTT_USERNAME: ${MQTT_USERNAME:-}
       MQTT_PASSWORD: ${MQTT_PASSWORD:-}
       MQTT_TOPIC: ${MQTT_TOPIC:-}
+      # Zustellung vom Broker: 0 = höchstens einmal (Standard), 1 = mindestens einmal (siehe README)
+      MQTT_QOS: ${MQTT_QOS:-}
       # Weitere Felder aus dem Alarm als Befehl, z.B. stadtteil,objekt (siehe README)
       EXTRA_FIELDS: ${EXTRA_FIELDS:-}
       # Pfad zur CSV mit RIC -> Name (siehe oben), z.B. /boswatch3-config/descriptions_ric.csv

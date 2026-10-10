@@ -30,6 +30,7 @@ die Alarme als JSON sendet.
    | `MQTT_PORT`          | nein    | Standard `1883`                                     |
    | `MQTT_USERNAME`, `MQTT_PASSWORD` | nein | falls der Broker Zugangsdaten verlangt   |
    | `MQTT_TOPIC`         | nein    | Standard `homeassistant/boswatch/alarm/+`           |
+   | `MQTT_QOS`           | nein    | `0` (Standard) oder `1`, siehe [MQTT-Zustellung](#mqtt-zustellung-qos) |
    | `CSV_PATH_RIC`       | nein    | CSV mit RIC → Name, siehe [Namen für RIC und Fahrzeuge](#namen-für-ric-und-fahrzeuge) |
    | `EXTRA_FIELDS`       | nein    | Weitere Felder aus dem Alarm als Befehl, z.B. `stadtteil,objekt` |
    | `LOG_LEVEL`          | nein    | Standard `INFO`, für die Fehlersuche `DEBUG`, siehe [Logs](#logs) |
@@ -426,6 +427,26 @@ duplicates:
 
 Kommen Alarme mehr als `remember_seconds` später noch einmal an, gelten sie als neu.
 
+## MQTT-Zustellung (QoS)
+
+Mit welcher Garantie der Broker einen Alarm an den Bot zustellt, stellst du mit `MQTT_QOS` ein, oder in
+`data/config.yaml` unter `mqtt:` mit `qos:`. Die Variable gewinnt.
+
+| Wert | Bedeutung |
+|------|-----------|
+| `0` (Standard) | höchstens einmal: Der Broker schickt die Nachricht ein Mal und wartet nicht auf eine Bestätigung. |
+| `1` | mindestens einmal: Der Broker wiederholt die Nachricht, bis der Bot den Empfang bestätigt hat. Doppelte Zustellungen sind dabei möglich, sie fängt die [Erkennung doppelter Alarme](#doppelte-alarme) ab. |
+
+Gut zu wissen:
+
+- Der Wert gilt für das Abonnement des Bots. Wurde ein Alarm mit QoS 1 veröffentlicht, der Bot aber mit QoS 0
+  abonniert, stellt der Broker mit QoS 0 zu. Welche Stufe tatsächlich galt, zeigt im DEBUG-Log jede Zeile
+  `Empfangen: … QoS n`.
+- Der Bot meldet sich bei jedem Start mit einer frischen Sitzung an. Auch mit `1` hält der Broker deshalb **keine
+  Alarme zurück, während der Bot neu startet** (z.B. bei einem Update). Dafür bräuchte es eine dauerhafte
+  Sitzung, die der Bot derzeit nicht verwendet.
+- Andere Werte als `0` und `1` stoppen den Start mit einer Erklärung.
+
 ## Benutzer und Admins
 
 Der Bot hat genau **einen** Token (`TELEGRAM_BOT_TOKEN`). Beim Zugriff gibt es
@@ -508,7 +529,7 @@ Der Bot schreibt auf die Standardausgabe. In Portainer: Container → **Logs**, 
 **INFO** (Standard) zeigt eine kurze Zeile pro Ereignis:
 
 ```
-2026-10-09 08:56:54+0200 INFO    mqtt.listener: Verbunden mit MQTT-Broker 192.168.1.100:1883, lausche auf Topic homeassistant/boswatch/alarm/+
+2026-10-09 08:56:54+0200 INFO    mqtt.listener: Verbunden mit MQTT-Broker 192.168.1.100:1883, lausche auf Topic homeassistant/boswatch/alarm/+ (QoS 0)
 2026-10-09 08:57:28+0200 INFO    mqtt.dispatch: Alarm 1234567 (Wache Nord): 2 Abo(s) in 1 Chat(s), gesendet 1/1
 2026-10-09 08:58:03+0200 INFO    mqtt.dispatch: Alarm 1234599 (Wache Süd): kein passendes Abo
 2026-10-09 08:58:40+0200 WARNING mqtt.dispatch: Senden an Chat -1001234567890 fehlgeschlagen (TimedOut: Timed out)
@@ -541,6 +562,16 @@ Die Alarmzeile nennt nur RIC und Name.
 - jede Anfrage des Bots an Telegram, auch das regelmäßige Abfragen neuer Nachrichten (deshalb viele Zeilen)
 
 DEBUG enthält die Alarmtexte. Nur zur Fehlersuche einschalten und das Log danach nicht aufbewahren.
+
+**Jeder Eintrag steht in einer Zeile.** Docker zerlegt mehrzeilige Einträge in einzelne Zeilen ohne Zeitstempel,
+und manche Oberflächen (z.B. Portainer) verfälschen dabei sogar Zeichen. Deshalb erscheinen Zeilenumbrüche in
+einer Meldung, etwa in der fertigen Alarmnachricht, als `⏎`:
+
+```
+DEBUG   mqtt.dispatch: Nachricht an Chat 4711: 🚨 <b>BOS-ALARM</b> 🚨 ⏎ Wache Nord ⏎ <i>abonniert über: RIC: 1234567</i>
+```
+
+Nur der Traceback eines Fehlers bleibt mehrzeilig, damit er lesbar ist.
 
 **Einstellen:** Umgebungsvariable `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) oder in
 `data/config.yaml`:

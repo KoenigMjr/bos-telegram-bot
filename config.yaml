@@ -10,6 +10,13 @@ mqtt:
   # '+' fängt jedes Fahrzeug-Subtopic ab, z.B. homeassistant/boswatch/alarm/1234567.
   # Schreibt dein Setup alles auf ein einziges Topic, hier die exakte Angabe eintragen.
   topic: "homeassistant/boswatch/alarm/+"
+  # Wie der Broker Alarme an den Bot zustellt. Per Umgebungsvariable MQTT_QOS änderbar.
+  #   0  höchstens einmal (Standard)
+  #   1  mindestens einmal: der Broker wiederholt eine Nachricht, wenn der Bot den Empfang nicht
+  #      bestätigt hat. Doppelte fängt die Erkennung doppelter Alarme (duplicates:) ab.
+  # Der Bot meldet sich bei jedem Start mit einer frischen Sitzung an, auch mit 1 hält der Broker
+  # also keine Alarme zurück, während der Bot neu startet.
+  qos: 0
 
 # Jeder Eintrag steht für ein Feld des MQTT-JSON und wird zu einem Telegram-Befehl.
 #

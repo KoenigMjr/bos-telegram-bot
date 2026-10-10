@@ -107,6 +107,19 @@ class LoggingStartupTests(WiringTestCase):
             "INFO    app: BOS-Telegram-Bot gestartet: 2 Admin(s), Befehle /ric, /description, /message, /subrictext, Log-Level INFO"
         ), summary)
 
+    def test_debug_output_is_one_line_per_entry_even_for_the_multiline_template(self):
+        """Der Fall aus dem echten Log: die mehrzeilige Vorlage wurde von Docker/Portainer zerlegt."""
+        self.start(LOG_LEVEL="debug")
+        lines = [line for line in self.output.getvalue().splitlines() if line.strip()]
+        self.assertTrue(all(line[:4].isdigit() and line[4] == "-" for line in lines),
+                        [line for line in lines if not line[:4].isdigit()])
+        template = next(line for line in lines if "Nachrichtenvorlage:" in line)
+        self.assertIn("BOS-ALARM</b> 🚨 ⏎", template)
+        self.assertIn("{DESCRIPTION_LIST|RIC_LIST}", template)
+        self.assertIn("{MESSAGE}", template)                  # nichts davon geht verloren
+        self.assertIn("{MATCHED}", template)
+        self.assertNotIn("\x00", self.output.getvalue())
+
     def test_info_hides_the_details(self):
         self.start()
         text = self.output.getvalue()
@@ -355,6 +368,32 @@ class UnassignedCsvStartupTests(WiringTestCase):
         self.put("data/descriptions_ric.csv", "for,add,isRegex\n1000043,Anderer Geheimer Name,false\n")
         self.start(LOG_LEVEL="debug")
         self.assertNotIn("Geheimer Name", self.output.getvalue())
+
+
+class QosStartupTests(WiringTestCase):
+    def write_config(self, text):
+        with open("data/config.yaml", "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def test_default_is_qos_0_and_debug_shows_it(self):
+        app = self.start(LOG_LEVEL="debug")
+        self.assertEqual(app.bot_data["config"]["mqtt"]["qos"], 0)
+        self.assertIn("Konfiguration: MQTT mqtt.local:1883, Topic homeassistant/boswatch/alarm/+, QoS 0,", self.output.getvalue())
+
+    def test_the_variable_sets_it(self):
+        app = self.start(MQTT_QOS="1", LOG_LEVEL="debug")
+        self.assertEqual(app.bot_data["config"]["mqtt"]["qos"], 1)
+        self.assertIn("QoS 1,", self.output.getvalue())
+
+    def test_the_config_file_sets_it_and_the_variable_wins(self):
+        self.write_config("mqtt:\n  qos: 1\n")
+        self.assertEqual(self.start().bot_data["config"]["mqtt"]["qos"], 1)
+        self.assertEqual(self.start(MQTT_QOS="0").bot_data["config"]["mqtt"]["qos"], 0)
+
+    def test_an_invalid_value_stops_the_start_with_an_explanation(self):
+        with self.assertRaises(SystemExit) as ctx:
+            self.start(MQTT_QOS="2")
+        self.assertIn("mqtt.qos muss 0 oder 1 sein", str(ctx.exception))
 
 
 class StartupErrorTests(WiringTestCase):
