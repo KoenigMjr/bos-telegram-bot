@@ -15,18 +15,22 @@ from bos_telegram_bot.storage import database as db
 log = logging.getLogger(__name__)
 
 
-def load_csv(csv_path: str) -> list:
+def load_csv(csv_path: str, field: str = None) -> list:
     """Lädt eine CSV im BOSWatch3-Descriptor-Schema (for,add,isRegex).
     Parsing bewusst identisch zu module/descriptor.py in BW3-Core gehalten,
     damit dieselbe Datei ohne Anpassung von beiden Systemen gelesen werden
-    kann (inkl. Toleranz für fehlende isRegex-Spalte)."""
+    kann (inkl. Toleranz für fehlende isRegex-Spalte).
+
+    field ist nur für das Log: Es nennt, zu welchem Feld die CSV gehört."""
+    label = f" (Feld {field})" if field else ""
     if not csv_path:
         return []
     if not os.path.isfile(csv_path):
-        log.warning("CSV nicht gefunden, es werden nur gelernte Werte genutzt: %s", csv_path)
+        log.warning("CSV nicht gefunden%s, es werden nur gelernte Werte genutzt: %s", label, csv_path)
         return []
 
     rows = []
+    skipped = 0
     with open(csv_path, "r", encoding="utf-8") as csvfile:
         reader = csv.DictReader(csvfile)
         for row_num, row in enumerate(reader, start=2):  # Zeile 1 = Header
@@ -40,12 +44,65 @@ def load_csv(csv_path: str) -> list:
                 try:
                     re.compile(clean_for)
                 except re.error as e:
+                    skipped += 1
                     log.warning("CSV %s, Zeile %d übersprungen (ungültiger Regex '%s'): %s", csv_path, row_num, clean_for, e)
                     continue
 
             rows.append({"for": clean_for, "add": (row.get("add") or "").strip(), "isRegex": is_regex})
-    log.info("CSV geladen: %d Einträge (%s)", len(rows), csv_path)
+    details = []
+    patterns = sum(1 for row in rows if row["isRegex"])
+    if patterns:
+        details.append(f"{patterns} Muster")
+    if skipped:
+        details.append(f"{skipped} übersprungen")
+    count = f"{len(rows)} Datensatz" if len(rows) == 1 else f"{len(rows)} Datensätze"
+    log.info("CSV eingelesen%s: %s%s aus %s", label, count,
+             f" ({', '.join(details)})" if details else "", os.path.abspath(csv_path))
     return rows
+
+
+def _csv_hint(name: str, entries: list) -> str:
+    """Der wahrscheinlichste Grund, warum eine CSV im Datenordner nicht zugeordnet wurde, und was zu tun ist."""
+    fields = [e["for"] for e in entries if e.get("add")]
+    fields_text = ("vorhanden: " + ", ".join(fields)) if fields else "kein Feld hat eine Namenssuche ('add:')"
+    match = re.fullmatch(r"descriptions_(.+)\.csv", name, flags=re.IGNORECASE)
+    if match:
+        wanted = match.group(1)
+        entry = next((e for e in entries if e.get("add") and e["for"].lower() == wanted.lower()), None)
+        if entry is None:
+            return f"Es gibt kein Feld '{wanted}' mit Namenssuche ({fields_text})."
+        expected = f"descriptions_{entry['for']}.csv"
+        if name != expected:
+            return f"Der Name muss genau '{expected}' lauten (Kleinschreibung, Endung .csv), dann wird sie automatisch erkannt."
+        if entry.get("csv"):
+            return (f"Für Feld '{entry['for']}' ist stattdessen {entry['csv']} eingestellt "
+                    f"(CSV_PATH_{entry['for'].upper()} oder 'csv:' in der Konfiguration).")
+    return (f"Zuordnen: in 'descriptions_<Feld>.csv' umbenennen ({fields_text}), in data/config.yaml "
+            f"bei dem Feld 'csv:' eintragen oder CSV_PATH_<FELD> setzen.")
+
+
+def find_unassigned_csvs(data_dir: str, entries: list) -> list:
+    """Sucht im Datenordner nach CSV-Dateien, die kein Feld verwendet, und warnt für jede.
+
+    Eine CSV liegt dort meist, weil jemand sie einbinden wollte, aber die Zuordnung fehlt (falscher Name,
+    Variable vergessen, eine andere CSV hat Vorrang). Der Bot würde sie sonst stillschweigend ignorieren.
+    Gesucht wird nur direkt im Ordner. Liefert die absoluten Pfade der nicht zugeordneten Dateien."""
+    try:
+        names = sorted(os.listdir(data_dir))
+    except OSError:
+        return []
+    used = {os.path.realpath(e["csv"]) for e in entries if e.get("csv")}
+    unassigned = []
+    for name in names:
+        path = os.path.join(data_dir, name)
+        if not name.lower().endswith(".csv") or not os.path.isfile(path) or os.path.realpath(path) in used:
+            continue
+        unassigned.append(os.path.abspath(path))
+        log.warning("CSV %s liegt im Datenordner, wird aber von keinem Feld verwendet und deshalb nicht gelesen. %s",
+                    os.path.abspath(path), _csv_hint(name, entries))
+    if not unassigned:
+        log.debug("Datenordner %s: keine nicht zugeordnete CSV", os.path.abspath(data_dir))
+    return unassigned
 
 
 def csv_covers(csv_rows: list, value: str):

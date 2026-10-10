@@ -20,7 +20,9 @@ log = logging.getLogger(__name__)
 
 # Die mitgelieferte config.yaml liegt im Hauptordner (im Image bzw. Repo), eine Ebene über dem Paket.
 BUNDLED_CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
-OPTIONAL_CONFIG_PATH = os.path.join("data", "config.yaml")
+# Der Datenordner (im Container /app/data): Datenbank, eigene config.yaml und CSV-Dateien.
+DATA_DIR = "data"
+OPTIONAL_CONFIG_PATH = os.path.join(DATA_DIR, "config.yaml")
 
 RESERVED_COMMANDS = {"start", "abo", "lastraw", "users", "adduser"}
 MATCH_MODES = ("exact", "contains")
@@ -238,7 +240,7 @@ def resolve_csv_paths(config: dict) -> None:
                 break
         else:
             if not entry.get("csv"):
-                auto = os.path.join("data", f"descriptions_{entry['for']}.csv")
+                auto = os.path.join(DATA_DIR, f"descriptions_{entry['for']}.csv")
                 if os.path.isfile(auto):
                     entry["csv"] = auto
 
