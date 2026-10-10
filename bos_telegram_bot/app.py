@@ -98,7 +98,15 @@ def main():
             log.info("%d Abo(s) von Feld '%s' auf '%s' umgestellt", renamed, old, new)
 
     for entry in entries:
-        entry["csv_rows"] = knowledge.load_csv(entry.get("csv")) if entry.get("add") else []
+        entry["csv_rows"] = []
+        if not entry.get("add"):
+            continue                       # nur Felder mit Namenssuche haben eine CSV
+        if entry.get("csv"):
+            entry["csv_rows"] = knowledge.load_csv(entry["csv"], entry["for"])
+        else:
+            searched = os.path.abspath(os.path.join(cfg.DATA_DIR, f"descriptions_{entry['for']}.csv"))
+            log.info("Keine CSV für Feld %s (gesucht: %s), es werden nur gelernte Namen genutzt", entry["for"], searched)
+    knowledge.find_unassigned_csvs(cfg.DATA_DIR, entries)      # liegt eine CSV im Datenordner, die niemand nutzt?
 
     remember_seconds = config["duplicates"]["remember_seconds"]
     delivered = DeliveryMemory(remember_seconds) if remember_seconds > 0 else None

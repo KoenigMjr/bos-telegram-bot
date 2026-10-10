@@ -175,6 +175,32 @@ Bot liest sie nur und verändert sie nie. Einbinden geht auf zwei Wegen:
 
 Die CSV wird beim Start eingelesen, Änderungen greifen nach einem Neustart.
 
+**Kontrolle im Log:** Der Start sagt immer, was mit der CSV passiert ist:
+
+```
+INFO    storage.knowledge: CSV eingelesen (Feld ric): 1523 Datensätze (12 Muster) aus /app/data/descriptions_ric.csv
+INFO    app: Keine CSV für Feld ric (gesucht: /app/data/descriptions_ric.csv), es werden nur gelernte Namen genutzt
+WARNING storage.knowledge: CSV nicht gefunden (Feld ric), es werden nur gelernte Werte genutzt: /boswatch3-config/descriptions_ric.csv
+```
+
+Die Zahl nennt alle gelesenen Datensätze, davon wie viele Muster (Regex) sind und, falls es welche gibt,
+wie viele Zeilen wegen eines ungültigen Ausdrucks übersprungen wurden (jede mit eigener Warnung).
+
+**Warnung bei einer CSV, die niemand verwendet:** Der Bot sieht beim Start im Datenordner nach (im Container
+`/app/data`, nur direkt im Ordner, nicht in Unterordnern). Liegt dort eine `.csv`, die keinem Feld zugeordnet
+ist, wird sie nicht still ignoriert, sondern gemeldet, samt dem wahrscheinlichen Grund:
+
+```
+WARNING storage.knowledge: CSV /app/data/wachen.csv liegt im Datenordner, wird aber von keinem Feld verwendet und deshalb nicht gelesen. Zuordnen: in 'descriptions_<Feld>.csv' umbenennen (vorhanden: ric), in data/config.yaml bei dem Feld 'csv:' eintragen oder CSV_PATH_<FELD> setzen.
+WARNING storage.knowledge: CSV /app/data/descriptions_RIC.csv liegt im Datenordner, wird aber von keinem Feld verwendet und deshalb nicht gelesen. Der Name muss genau 'descriptions_ric.csv' lauten (Kleinschreibung, Endung .csv), dann wird sie automatisch erkannt.
+WARNING storage.knowledge: CSV /app/data/descriptions_ric.csv liegt im Datenordner, wird aber von keinem Feld verwendet und deshalb nicht gelesen. Für Feld 'ric' ist stattdessen /boswatch3-config/descriptions_ric.csv eingestellt (CSV_PATH_RIC oder 'csv:' in der Konfiguration).
+```
+
+Typische Gründe: ein anderer Dateiname, Groß-/Kleinschreibung (Linux unterscheidet sie), ein Feld, das es nicht
+gibt oder keine Namenssuche (`add:`) hat, oder eine andere CSV hat Vorrang (Reihenfolge: Umgebungsvariable,
+dann `csv:` in der Konfiguration, dann `descriptions_<Feld>.csv`). Die Dateien selbst werden nicht gelesen oder
+verändert, ihr Inhalt landet nie im Log.
+
 ```
 for,add,isRegex
 1234567,Rettungswagen Musterstadt A-Wehr,false

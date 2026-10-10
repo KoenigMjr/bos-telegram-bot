@@ -209,6 +209,154 @@ class DuplicateDetectionStartupTests(WiringTestCase):
         self.assertNotIn("Doppelte Alarme", self.output.getvalue())
 
 
+class CsvLogStartupTests(WiringTestCase):
+    """Der Start sagt immer, was mit der CSV passiert ist, auch wenn es keine gibt."""
+
+    def lines(self):
+        return self.output.getvalue().splitlines()
+
+    def csv_lines(self):
+        return [line for line in self.lines() if "CSV" in line]
+
+    def test_a_loaded_csv_is_reported_at_info_with_the_number_of_records(self):
+        with open("data/descriptions_ric.csv", "w", encoding="utf-8") as f:
+            f.write(CSV)
+        self.start()
+        (line,) = self.csv_lines()
+        self.assertEqual(line.split()[2], "INFO")
+        self.assertTrue(line.endswith(
+            f"CSV eingelesen (Feld ric): 2 Datensätze (1 Muster) aus {os.path.abspath('data/descriptions_ric.csv')}"), line)
+
+    def test_no_csv_is_reported_too_with_the_place_where_it_was_searched(self):
+        self.start()
+        (line,) = self.csv_lines()
+        self.assertEqual(line.split()[2], "INFO")
+        self.assertTrue(line.endswith(
+            f"Keine CSV für Feld ric (gesucht: {os.path.abspath('data/descriptions_ric.csv')}), es werden nur gelernte Namen genutzt"), line)
+
+    def test_a_configured_but_missing_csv_is_a_warning(self):
+        self.start(CSV_PATH_RIC="/boswatch3-config/descriptions_ric.csv")
+        (line,) = self.csv_lines()
+        self.assertEqual(line.split()[2], "WARNING")
+        self.assertIn("CSV nicht gefunden (Feld ric)", line)
+        self.assertTrue(line.endswith("/boswatch3-config/descriptions_ric.csv"))
+
+    def test_a_csv_from_the_environment_is_reported(self):
+        path = os.path.abspath("elsewhere.csv")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(CSV)
+        self.start(CSV_PATH_RIC=path)
+        self.assertIn(f"CSV eingelesen (Feld ric): 2 Datensätze (1 Muster) aus {path}", self.csv_lines()[0])
+
+    def test_fields_without_a_name_search_get_no_csv_line(self):
+        self.start(EXTRA_FIELDS="stadtteil,objekt")
+        self.assertEqual(len(self.csv_lines()), 1)            # nur ric (mit description), nicht message, subricText, stadtteil
+
+    def test_a_field_with_a_name_search_in_the_config_gets_its_own_line(self):
+        with open("data/config.yaml", "w", encoding="utf-8") as f:
+            f.write("fields:\n  - for: ric\n    add: description\n  - for: stadtteil\n    add: stadtteil_name\n")
+        self.start()
+        self.assertEqual(len(self.csv_lines()), 2)
+        self.assertTrue(any("Feld stadtteil" in line and "descriptions_stadtteil.csv" in line for line in self.csv_lines()))
+
+    def test_the_csv_line_comes_before_the_start_message(self):
+        with open("data/descriptions_ric.csv", "w", encoding="utf-8") as f:
+            f.write(CSV)
+        self.start()
+        text = "\n".join(self.lines())
+        self.assertLess(text.index("CSV eingelesen"), text.index("gestartet"))
+
+    def test_the_names_inside_the_csv_are_not_logged_at_info(self):
+        with open("data/descriptions_ric.csv", "w", encoding="utf-8") as f:
+            f.write(CSV)
+        self.start()
+        self.assertNotIn("Rettungswagen Musterstadt", self.output.getvalue())
+
+
+class UnassignedCsvStartupTests(WiringTestCase):
+    """Die Warnung beim Start vor einer CSV im Datenordner, die kein Feld verwendet."""
+    CSV3 = "for,add,isRegex\n1000011,Wache Nord,false\n1000043,Lagedienst Musterstadt,false\n^23456([0-9]{2})$,Feuerwehr Musterstadt,true\n"
+    CSV1 = "for,add,isRegex\n1000011,Wache Nord,false\n"
+
+    def put(self, path, text=CSV1):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+
+    def levels(self, level):
+        return [line for line in self.output.getvalue().splitlines() if line.split()[2:3] == [level]]
+
+    def warnings(self):
+        return self.levels("WARNING")
+
+    def test_a_clean_data_folder_raises_no_warning(self):
+        self.put("data/descriptions_ric.csv", self.CSV3)
+        self.start()
+        self.assertEqual(self.warnings(), [])
+
+    def test_a_csv_in_the_data_folder_that_nobody_uses_is_a_warning(self):
+        self.put("data/wachen.csv")
+        app = self.start()                                            # der Start läuft trotzdem durch
+        self.assertIsNotNone(app)
+        (warning,) = self.warnings()
+        self.assertIn(f"CSV {os.path.abspath('data/wachen.csv')} liegt im Datenordner, wird aber von keinem Feld verwendet", warning)
+        self.assertIn("umbenennen", warning)
+
+    def test_the_warning_comes_before_the_start_message(self):
+        self.put("data/wachen.csv")
+        self.start()
+        lines = self.output.getvalue().splitlines()
+        warned = next(i for i, line in enumerate(lines) if "liegt im Datenordner" in line)
+        started = next(i for i, line in enumerate(lines) if "gestartet" in line)
+        self.assertLess(warned, started)
+
+    def test_a_correctly_named_csv_raises_no_warning_but_a_second_one_does(self):
+        self.put("data/descriptions_ric.csv")
+        self.put("data/alt.csv")
+        self.start()
+        (warning,) = self.warnings()
+        self.assertIn("alt.csv", warning)
+        self.assertNotIn("descriptions_ric.csv", warning)
+
+    def test_a_wrongly_capitalised_name_is_explained(self):
+        self.put("data/Descriptions_RIC.csv")
+        self.start()
+        (warning,) = self.warnings()
+        self.assertIn("Der Name muss genau 'descriptions_ric.csv' lauten", warning)
+
+    def test_the_variable_beats_the_default_file_and_the_default_file_is_flagged(self):
+        self.put("data/descriptions_ric.csv")
+        self.put("extern/andere.csv")
+        self.start(CSV_PATH_RIC="extern/andere.csv")
+        (warning,) = self.warnings()
+        self.assertIn("descriptions_ric.csv", warning)
+        self.assertIn("Für Feld 'ric' ist stattdessen extern/andere.csv eingestellt (CSV_PATH_RIC", warning)
+
+    def test_a_csv_set_in_the_config_file_is_assigned(self):
+        self.put("data/meine.csv")
+        self.put("data/config.yaml", "fields:\n  - for: ric\n    csv: data/meine.csv\n")
+        self.start()
+        self.assertEqual(self.warnings(), [])
+        self.assertTrue(any("CSV eingelesen (Feld ric): 1 Datensatz aus" in line for line in self.levels("INFO")))
+
+    def test_files_in_subfolders_and_other_file_types_are_ignored(self):
+        self.put("data/archiv/alt.csv")
+        self.put("data/notizen.txt", "x")
+        self.start()
+        self.assertEqual(self.warnings(), [])
+
+    def test_debug_confirms_that_the_folder_is_clean(self):
+        self.put("data/descriptions_ric.csv")
+        self.start(LOG_LEVEL="debug")
+        self.assertIn("keine nicht zugeordnete CSV", self.output.getvalue())
+
+    def test_the_csv_content_is_not_in_the_log_even_with_debug(self):
+        self.put("data/wachen.csv", "for,add,isRegex\n1000011,Geheimer Name,false\n")
+        self.put("data/descriptions_ric.csv", "for,add,isRegex\n1000043,Anderer Geheimer Name,false\n")
+        self.start(LOG_LEVEL="debug")
+        self.assertNotIn("Geheimer Name", self.output.getvalue())
+
+
 class StartupErrorTests(WiringTestCase):
     def test_missing_token(self):
         with patch.dict(os.environ, {"ADMIN_USERS": "1"}, clear=True), self.assertRaises(SystemExit) as ctx:
