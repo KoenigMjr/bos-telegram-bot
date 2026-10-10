@@ -1,7 +1,6 @@
 """Gemeinsame Hilfen der Chat-Tests."""
 import unittest
 
-
 from bos_telegram_bot.chat import buttons, fields
 from bos_telegram_bot.core.matching import candidate_values, match_sub
 from tests.helpers import Env, make_callback, make_update

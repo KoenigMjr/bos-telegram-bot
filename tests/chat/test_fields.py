@@ -1,6 +1,5 @@
 import unittest
 
-
 from bos_telegram_bot.chat import fields
 from bos_telegram_bot.storage import database as db
 from tests.chat.base import CommandTestCase, matches, reply_buttons

@@ -1,6 +1,5 @@
 import unittest
 
-
 from bos_telegram_bot.chat import admin, overview
 from bos_telegram_bot.storage import database as db
 from tests.chat.base import CommandTestCase, reply_buttons

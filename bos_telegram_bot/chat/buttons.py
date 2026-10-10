@@ -1,5 +1,7 @@
 """Inline-Buttons: Antworten auf Klicks in den Menüs."""
 
+import logging
+
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -7,6 +9,8 @@ from bos_telegram_bot.chat.access import is_admin, restricted, try_send
 from bos_telegram_bot.chat.common import entry_by_for, get_db_path
 from bos_telegram_bot.chat.fields import create_name_pattern, send_page, subscribe_row
 from bos_telegram_bot.storage import database as db
+
+log = logging.getLogger(__name__)
 
 
 _EXPIRED = "⌛ Diese Auswahl ist abgelaufen (z.B. nach einem Neustart). Bitte die Suche erneut ausführen."
@@ -34,14 +38,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             if action == "ok":
                 db.set_user_status(admin_db_path, uid, "allowed")
+                log.info("Admin %s hat %s freigeschaltet", query.from_user.id, uid)
                 await query.edit_message_text(f"✅ Freigeschaltet: {uid}")
                 await try_send(context, uid, "✅ Du wurdest freigeschaltet. Schreibe /start für eine Übersicht.")
             else:
                 db.set_user_status(admin_db_path, uid, "denied")
+                log.info("Admin %s hat die Anfrage von %s abgelehnt", query.from_user.id, uid)
                 await query.edit_message_text(f"❌ Abgelehnt: {uid}")
         else:  # usr:del
             db.remove_user(admin_db_path, uid)
             db.remove_chat_subs(admin_db_path, uid)  # private Abos des Users entfernen
+            log.info("Admin %s hat %s den Zugriff entzogen (inkl. privater Abos)", query.from_user.id, uid)
             await query.edit_message_text(f"🗑️ Zugriff entzogen: {uid} (inkl. seiner privaten Abos)")
         return
 
@@ -54,6 +61,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("del:"):
         sub_id = int(data.split(":", 1)[1])
         db.remove_sub_by_id(get_db_path(context), chat_id, sub_id)
+        log.info("Abo entfernt: Chat %s, Abo %s", chat_id, sub_id)
         return await query.edit_message_text("🗑️ Abonnement entfernt.")
 
     if data.startswith("cancel:"):

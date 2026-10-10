@@ -1,5 +1,6 @@
 """Verdrahtung: liest die Konfiguration, richtet Datenbank und Telegram-Befehle ein und startet den Bot."""
 import asyncio
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -7,10 +8,13 @@ from telegram import BotCommand, BotCommandScopeChat
 from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from bos_telegram_bot import config as cfg
+from bos_telegram_bot import logs
 from bos_telegram_bot.chat import admin, buttons, fields, overview, prompts
 from bos_telegram_bot.mqtt.listener import start_mqtt_listener
 from bos_telegram_bot.storage import database as db
 from bos_telegram_bot.storage import knowledge
+
+log = logging.getLogger(__name__)
 
 # load_dotenv() ist ein No-Op, wenn keine .env-Datei existiert. Docker und
 # andere Umgebungen setzen die Variablen direkt, beides landet in os.environ.
@@ -53,7 +57,7 @@ async def post_init(app):
         try:
             await app.bot.set_my_commands(admin_menu, scope=BotCommandScopeChat(chat_id=admin_id))
         except Exception as e:
-            print(f"[Setup] Admin-Befehlsmenü für {admin_id} nicht gesetzt: {e}")
+            log.info("Admin-Befehlsmenü für %s nicht gesetzt (hat der Admin dem Bot schon geschrieben?): %s", admin_id, e)
 
     asyncio.create_task(start_mqtt_listener(app))
 
@@ -62,6 +66,10 @@ def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("TELEGRAM_BOT_TOKEN fehlt (Umgebungsvariable oder .env prüfen)")
+
+    # Zuerst das Logging, damit schon das Laden der Konfiguration protokolliert wird. Das Token wird
+    # in jeder Ausgabe geschwärzt. Der endgültige Pegel kommt nach dem Laden aus der Konfiguration.
+    logs.setup_logging(os.getenv("LOG_LEVEL") or "INFO", secrets=[token])
 
     admins = cfg.parse_admin_users(os.getenv("ADMIN_USERS", ""))
     if not admins:
@@ -74,6 +82,9 @@ def main():
         )
 
     config = cfg.load_config()
+    logs.set_level(config["logging"]["level"])
+    log.debug("Konfiguration: MQTT %s:%s, Topic %s, Datenbank %s",
+              config["mqtt"]["host"], config["mqtt"]["port"], config["mqtt"]["topic"], config["files"]["db_path"])
     entries = config["fields"]
     command_map = cfg.build_command_map(entries)
 
@@ -83,7 +94,7 @@ def main():
     for old, new in LEGACY_FIELD_RENAMES.items():
         renamed = db.rename_field(db_path, old, new)
         if renamed:
-            print(f"[Migration] {renamed} Abo(s) von Feld '{old}' auf '{new}' umgestellt")
+            log.info("%d Abo(s) von Feld '%s' auf '%s' umgestellt", renamed, old, new)
 
     for entry in entries:
         entry["csv_rows"] = knowledge.load_csv(entry.get("csv")) if entry.get("add") else []
@@ -118,11 +129,14 @@ def main():
         handler = make(cmd["entry"])
         app.add_handler(CommandHandler(cmd["name"], handler))
         prompt_handlers[(cmd["kind"], cmd["entry"]["for"])] = handler
-        print(f"[Setup] /{cmd['name']} -> Feld '{cmd['entry']['for' if cmd['kind'] == 'for' else 'add']}'")
+        log.debug("Befehl /%s -> Feld '%s'", cmd["name"], cmd["entry"]["for" if cmd["kind"] == "for" else "add"])
     app.bot_data["prompt_handlers"] = prompt_handlers
     app.add_handler(MessageHandler(filters.REPLY & filters.TEXT & ~filters.COMMAND, prompts.prompt_reply_handler))
 
-    print(f"🤖 BOS-Telegram-Bot gestartet ({len(admins)} Admin(s), {len(command_map)} Feld-Befehle)")
+    notification = app.bot_data["notification_template"]
+    log.debug("Nachrichtenvorlage:\n%s", notification)
+    log.info("BOS-Telegram-Bot gestartet: %d Admin(s), Befehle %s, Log-Level %s", len(admins),
+             ", ".join("/" + c["name"] for c in command_map), config["logging"]["level"])
     app.run_polling()
 
 

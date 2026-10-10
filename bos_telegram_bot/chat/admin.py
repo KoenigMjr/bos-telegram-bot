@@ -1,6 +1,7 @@
 """Benutzerverwaltung für Admins: /users und /adduser."""
 
 import html
+import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -8,6 +9,8 @@ from telegram.ext import ContextTypes
 from bos_telegram_bot.chat.access import admin_only, is_admin, restricted, try_send
 from bos_telegram_bot.chat.prompts import PROMPT_HOW, PROMPT_MARKER, ask
 from bos_telegram_bot.storage import database as db
+
+log = logging.getLogger(__name__)
 
 
 @restricted
@@ -70,5 +73,6 @@ async def adduser_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     name = " ".join(context.args[1:]).strip() or None
     db.set_user_status(db_path, uid, "allowed", name)
+    log.info("Admin %s hat %s freigeschaltet", update.effective_user.id, uid)
     await update.message.reply_text(f"✅ Freigeschaltet: <code>{uid}</code>", parse_mode="HTML")
     await try_send(context, uid, "✅ Du wurdest freigeschaltet. Schreibe /start für eine Übersicht.")

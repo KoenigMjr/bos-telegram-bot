@@ -77,5 +77,13 @@ fields:
 # Die ältere Einstellung 'notification_fields: [description, message, ric]' (Felder, je eine Zeile)
 # funktioniert weiter, 'notification.template' hat aber Vorrang.
 
+# Ausführlichkeit der Logs. Per Umgebungsvariable LOG_LEVEL änderbar.
+#   INFO     eine kurze Zeile pro Ereignis (Alarm verarbeitet, Abo angelegt, Verbindung)
+#   DEBUG    zusätzlich Rohdaten: Topic, QoS, kompletter Payload, passende Abos, fertige Nachricht.
+#            Enthält die Alarmtexte, das Log dann nicht lange aufbewahren.
+#   WARNING  nur Probleme
+logging:
+  level: INFO
+
 files:
   db_path: "data/bot_db.sqlite3"

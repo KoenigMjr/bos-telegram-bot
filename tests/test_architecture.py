@@ -4,7 +4,8 @@ core    kennt weder Telegram noch MQTT noch die Datenbank
 storage kennt kein Telegram und kein MQTT
 mqtt    nutzt core und storage, kennt chat nicht
 chat    nutzt core und storage, kennt mqtt nicht
-config  nutzt nur core"""
+config  nutzt nur core und logs
+logs    ist neutral (darf von überall genutzt werden und kennt selbst nichts aus dem Projekt)"""
 import ast
 import glob
 import os
@@ -65,9 +66,14 @@ class LayerRuleTests(unittest.TestCase):
                         problems.append(f"{name}: darf {top} nicht importieren")
         self.assertEqual(problems, [])
 
-    def test_config_only_uses_core(self):
+    def test_config_only_uses_core_and_logs(self):
         problems = [m for m in imports_of(os.path.join(ROOT, "config.py"))
-                    if m.startswith(PACKAGE) and layer_of(m) not in ("core", None)]
+                    if m.startswith(PACKAGE) and layer_of(m) not in ("core", "logs", None)]
+        self.assertEqual(problems, [])
+
+    def test_logs_is_neutral_and_imports_nothing_from_the_project(self):
+        """logs.py darf von überall genutzt werden, deshalb darf es selbst nichts aus dem Projekt kennen."""
+        problems = [m for m in imports_of(os.path.join(ROOT, "logs.py")) if m.split(".")[0] == PACKAGE]
         self.assertEqual(problems, [])
 
     def test_the_rules_would_catch_a_violation(self):

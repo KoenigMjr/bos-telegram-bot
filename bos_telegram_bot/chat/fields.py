@@ -1,6 +1,7 @@
 """Abonnieren per Feld-Befehl (/ric, /message ...) und per Namenssuche (/description)."""
 
 import html
+import logging
 import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -12,6 +13,8 @@ from bos_telegram_bot.chat.hints import check_hints
 from bos_telegram_bot.chat.prompts import PROMPT_HOW, PROMPT_MARKER, ask
 from bos_telegram_bot.core.matching import is_pattern_input, wildcard_to_regex
 from bos_telegram_bot.storage import database as db, knowledge
+
+log = logging.getLogger(__name__)
 
 
 ITEMS_PER_PAGE = 5
@@ -77,6 +80,7 @@ def make_for_handler(entry: dict):
             return await update.message.reply_text(f"❌ Ungültiges Muster: {html.escape(str(e))}")
 
         db.add_sub(db_path, chat_id, field, target, alias, is_regex)
+        log.info("Abo gesetzt: Chat %s, Feld %s, %s", chat_id, field, "Muster %r" % target if is_regex else "Wert %r" % target)
         hints = check_hints(context, field, target, is_regex)
         if name:
             text = _confirmation("✅ Abonniert:", alias, hints, f"{html.escape(label)}: <code>{html.escape(raw)}</code>")
@@ -92,6 +96,7 @@ def make_for_handler(entry: dict):
 async def subscribe_row(reply, context, chat_id: int, entry: dict, row: dict) -> None:
     """Abonniert den 'for'-Wert (z.B. die RIC) zu einem ausgewählten Namen."""
     db.add_sub(get_db_path(context), chat_id, entry["for"], row["for"], row["add"], row["isRegex"])
+    log.info("Abo gesetzt: Chat %s, Feld %s, %s", chat_id, entry["for"], ("Muster %r" if row["isRegex"] else "Wert %r") % row["for"])
     kind = "Muster" if row["isRegex"] else entry["label"]
     detail = f"{html.escape(kind)}: <code>{html.escape(row['for'])}</code>"
     await reply(_confirmation("✅ Abonniert:", row["add"], [], detail), parse_mode="HTML")
@@ -106,6 +111,7 @@ async def create_name_pattern(reply, context, chat_id: int, entry: dict, raw: st
         return await reply(f"❌ Ungültiges Muster: {html.escape(str(e))}")
     alias = f"{add_label}: {raw}"
     db.add_sub(get_db_path(context), chat_id, add_key, regex, alias, True)
+    log.info("Abo gesetzt: Chat %s, Feld %s, Muster %r", chat_id, add_key, regex)
     hints = check_hints(context, add_key, regex, True)
     await reply(_confirmation("✅ Filter angelegt:", alias, hints), parse_mode="HTML")
 

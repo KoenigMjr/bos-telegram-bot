@@ -1,6 +1,5 @@
 import unittest
 
-
 from bos_telegram_bot.chat import overview
 from tests.chat.base import CommandTestCase
 from tests.helpers import make_update, sent_text

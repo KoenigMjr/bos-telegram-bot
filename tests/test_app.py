@@ -1,5 +1,7 @@
 """Integrationstest: das echte main() mit allem, was beim Start passiert (ohne Netzwerk)."""
 import datetime as dt
+import io
+import logging
 import os
 import tempfile
 import unittest
@@ -11,6 +13,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 from bos_telegram_bot.storage import database as db
 from bos_telegram_bot import app as bot_app
 from bos_telegram_bot import config as cfg
+from bos_telegram_bot import logs
 from tests.helpers import make_entries
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE
 
@@ -26,9 +29,12 @@ class WiringTestCase(unittest.TestCase):
         os.chdir(tmp.name)
         self.addCleanup(os.chdir, previous)
         os.makedirs("data")
-        for patcher in (patch("builtins.print"),):
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        # Die Logzeilen landen im Puffer statt auf der Konsole, und das Logging wird danach zurückgesetzt.
+        self.output = io.StringIO()
+        capture = patch("sys.stdout", self.output)
+        capture.start()
+        self.addCleanup(capture.stop)
+        self.addCleanup(logs.reset_logging)
 
     def start(self, **env):
         """Führt bot_app.main() aus, nur das Polling ist ersetzt. Liefert die Application."""
@@ -84,6 +90,90 @@ class StartupTests(WiringTestCase):
         self.assertEqual(data["field_labels"]["description"], "Fahrzeug / Wache")
         self.assertIsNone(data["last_payload"])
         self.assertEqual(data["notification_template"], DEFAULT_TEMPLATE)
+
+
+TOKEN = "123456789:ABCDEFghijklmnopqrstuvwxyz_0123456"
+
+
+class LoggingStartupTests(WiringTestCase):
+    def lines(self):
+        return self.output.getvalue().splitlines()
+
+    def test_info_logs_one_summary_line_with_commands_and_level(self):
+        self.start()
+        (summary,) = [line for line in self.lines() if "gestartet" in line]
+        self.assertTrue(summary.endswith(
+            "INFO    app: BOS-Telegram-Bot gestartet: 2 Admin(s), Befehle /ric, /description, /message, /subrictext, Log-Level INFO"
+        ), summary)
+
+    def test_info_hides_the_details(self):
+        self.start()
+        text = self.output.getvalue()
+        self.assertNotIn("Befehl /ric", text)
+        self.assertNotIn("Nachrichtenvorlage", text)
+        self.assertNotIn("DEBUG", text)
+
+    def test_debug_from_the_environment_adds_the_details(self):
+        self.start(LOG_LEVEL="debug")
+        text = self.output.getvalue()
+        self.assertIn("Befehl /ric -> Feld 'ric'", text)
+        self.assertIn("Befehl /description -> Feld 'description'", text)
+        self.assertIn("Nachrichtenvorlage:", text)
+        self.assertIn("Konfiguration: MQTT mqtt.local:1883, Topic homeassistant/boswatch/alarm/+", text)
+        self.assertIn("Log-Level DEBUG", text)
+
+    def test_level_from_the_config_file(self):
+        with open("data/config.yaml", "w", encoding="utf-8") as f:
+            f.write("logging:\n  level: warning\n")
+        self.start()
+        self.assertEqual(logging.getLogger("bos_telegram_bot").level, logging.WARNING)
+        self.assertNotIn("gestartet", self.output.getvalue())
+
+    def test_environment_beats_the_config_file(self):
+        with open("data/config.yaml", "w", encoding="utf-8") as f:
+            f.write("logging:\n  level: warning\n")
+        self.start(LOG_LEVEL="debug")
+        self.assertEqual(logging.getLogger("bos_telegram_bot").level, logging.DEBUG)
+
+    def test_an_invalid_level_stops_the_start_with_an_explanation(self):
+        with self.assertRaises(SystemExit) as ctx:
+            self.start(LOG_LEVEL="laut")
+        self.assertIn("logging.level", str(ctx.exception))
+        self.assertIn("DEBUG, INFO, WARNING, ERROR, CRITICAL", str(ctx.exception))
+
+    def test_the_token_never_appears_in_the_output(self):
+        self.start(TELEGRAM_BOT_TOKEN=TOKEN, LOG_LEVEL="debug")
+        logging.getLogger("httpx").info('HTTP Request: POST https://api.telegram.org/bot%s/getMe "HTTP/1.1 200 OK"', TOKEN)
+        logging.getLogger("bos_telegram_bot.x").error("Fehler mit Token %s", TOKEN)
+        text = self.output.getvalue()
+        self.assertNotIn(TOKEN, text)
+        self.assertNotIn("ABCDEFghij", text)
+        self.assertIn("https://api.telegram.org/bot<TOKEN>/getMe", text)
+        self.assertIn("Fehler mit Token <TOKEN>", text)
+
+    def test_the_short_dummy_token_of_the_tests_is_hidden_too(self):
+        self.start()
+        logging.getLogger("bos_telegram_bot.x").info("Token 123:dummy")
+        self.assertNotIn("123:dummy", self.output.getvalue())
+
+    def test_the_config_file_in_use_is_logged(self):
+        with open("data/config.yaml", "w", encoding="utf-8") as f:
+            f.write("logging:\n  level: info\n")
+        self.start()
+        self.assertTrue(any("Eigene Anpassungen geladen: " in line and line.split()[2] == "INFO" for line in self.lines()))
+
+    def test_a_migration_is_logged(self):
+        db.init_db("data/bot_db.sqlite3")
+        db.add_sub("data/bot_db.sqlite3", 5, "subric_text", "a", "Sub-RIC: a", False)
+        self.start()
+        self.assertIn("1 Abo(s) von Feld 'subric_text' auf 'subricText' umgestellt", self.output.getvalue())
+
+    def test_starting_twice_does_not_duplicate_lines(self):
+        self.start()
+        self.output.truncate(0)
+        self.output.seek(0)
+        self.start()
+        self.assertEqual(len([line for line in self.lines() if "gestartet" in line]), 1)
 
 
 class StartupErrorTests(WiringTestCase):

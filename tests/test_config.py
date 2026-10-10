@@ -27,9 +27,6 @@ class ConfigTestCase(unittest.TestCase):
         patcher = patch.dict(os.environ, {}, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
-        quiet = patch("builtins.print")
-        quiet.start()
-        self.addCleanup(quiet.stop)
 
     def load(self, override=None, **env):
         if override is not None:
@@ -239,6 +236,48 @@ class NullInNewBlockTests(ConfigTestCase):
 
     def test_null_removes_a_whole_block(self):
         self.assertNotIn("mqtt", cfg.deep_merge({"mqtt": {"a": 1}}, {"mqtt": None}))
+
+
+class LoggingSettingsTests(ConfigTestCase):
+    VALID = "DEBUG, INFO, WARNING, ERROR, CRITICAL"
+
+    def test_default_level_is_info(self):
+        self.assertEqual(self.load()["logging"], {"level": "INFO"})
+
+    def test_level_from_the_override_file_is_normalized(self):
+        self.assertEqual(self.load("logging:\n  level: debug\n")["logging"]["level"], "DEBUG")
+
+    def test_environment_beats_the_file(self):
+        config = self.load("logging:\n  level: debug\n", LOG_LEVEL="warning")
+        self.assertEqual(config["logging"]["level"], "WARNING")
+
+    def test_environment_alone_is_enough(self):
+        self.assertEqual(self.load(LOG_LEVEL=" Debug ")["logging"]["level"], "DEBUG")
+
+    def test_empty_environment_value_is_ignored(self):
+        self.assertEqual(self.load("logging:\n  level: warning\n", LOG_LEVEL="")["logging"]["level"], "WARNING")
+
+    def test_invalid_level_in_the_file_names_the_valid_ones(self):
+        message = self.expect_exit("logging:\n  level: laut\n")
+        self.assertIn("logging.level", message)
+        self.assertIn(self.VALID, message)
+        self.assertIn("'laut'", message)
+
+    def test_invalid_level_from_the_environment(self):
+        message = self.expect_exit(LOG_LEVEL="laut")
+        self.assertIn("logging.level", message)
+        self.assertIn("'laut'", message)
+
+    def test_logging_must_be_a_block(self):
+        self.assertIn("logging muss ein Block sein", self.expect_exit("logging: laut\n"))
+
+    def test_removing_the_block_falls_back_to_info(self):
+        self.assertEqual(self.load("logging: null\n")["logging"]["level"], "INFO")
+
+    def test_other_problems_are_reported_together_with_a_bad_level(self):
+        message = self.expect_exit("logging:\n  level: laut\nfields:\n  - for: ric\n    match: zufall\n")
+        self.assertIn("logging.level", message)
+        self.assertIn("match muss", message)
 
 
 class CommandMapTests(ConfigTestCase):

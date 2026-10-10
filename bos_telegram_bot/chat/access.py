@@ -1,12 +1,15 @@
 """Zugriffsprüfung: Admins, freigeschaltete User und Zugriffsanfragen."""
 
 import html
+import logging
 from functools import wraps
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from bos_telegram_bot.storage import database as db
+
+log = logging.getLogger(__name__)
 
 
 def is_admin(context, user_id: int) -> bool:
@@ -20,7 +23,7 @@ async def try_send(context, chat_id: int, text: str, **kwargs) -> bool:
         await context.bot.send_message(chat_id=chat_id, text=text, **kwargs)
         return True
     except Exception as e:
-        print(f"[Telegram] Nachricht an {chat_id} nicht zustellbar: {e}")
+        log.warning("Nachricht an %s nicht zustellbar (%s: %s)", chat_id, type(e).__name__, e)
         return False
 
 
@@ -74,6 +77,7 @@ def restricted(func):
             return
 
         if not update.message or status == "denied":
+            log.debug("Abgelehnter oder unbekannter Absender %s ignoriert", user.id)
             return
         if status == "pending":
             return await update.message.reply_text(
@@ -81,6 +85,7 @@ def restricted(func):
             )
 
         db.set_user_status(db_path, user.id, "pending", user.full_name)
+        log.info("Zugriffsanfrage von %s (Chat %s)", user.id, update.effective_chat.id)
         await update.message.reply_text(
             f"⛔ Keine Berechtigung. Deine Telegram-ID: {user.id}\n"
             f"Eine Zugriffsanfrage wurde an die Admins gesendet."

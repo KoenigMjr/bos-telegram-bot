@@ -2,10 +2,22 @@
 
 import asyncio
 import json
+import logging
 
 import aiomqtt
 
 from bos_telegram_bot.mqtt.dispatch import handle_payload, learn_payload
+
+log = logging.getLogger(__name__)
+
+MAX_RAW_LOG = 4000
+
+
+def log_incoming(topic, qos, retain, raw: str) -> None:
+    """Debug-Log: was vom Broker angekommen ist, bevor irgendetwas damit passiert."""
+    log.debug("Empfangen: Topic %s, QoS %s, retain=%s, %d Zeichen", topic, qos, retain, len(raw))
+    shown = raw if len(raw) <= MAX_RAW_LOG else raw[:MAX_RAW_LOG] + f"… (+{len(raw) - MAX_RAW_LOG} Zeichen)"
+    log.debug("Payload: %s", shown)
 
 
 async def start_mqtt_listener(app):
@@ -25,11 +37,14 @@ async def start_mqtt_listener(app):
                 password=mqtt_conf.get("password") or None,
             ) as client:
                 await client.subscribe(mqtt_conf["topic"])
-                print(f"[MQTT] Verbunden und lausche auf Topic: {mqtt_conf['topic']}")
+                log.info("Verbunden mit MQTT-Broker %s:%s, lausche auf Topic %s",
+                         mqtt_conf["host"], mqtt_conf["port"], mqtt_conf["topic"])
 
                 async for message in client.messages:
                     raw = message.payload.decode(errors="replace").strip()
+                    log_incoming(message.topic, message.qos, message.retain, raw)
                     if not raw:
+                        log.debug("Leere Nachricht ignoriert (Topic %s)", message.topic)
                         continue
 
                     try:
@@ -37,9 +52,11 @@ async def start_mqtt_listener(app):
                     except json.JSONDecodeError:
                         # Home-Assistant-Discovery-Configs oder andere
                         # Nicht-Alarm-Nachrichten auf demselben Topic-Ast.
+                        log.debug("Kein JSON, ignoriert (Topic %s)", message.topic)
                         continue
 
                     if not isinstance(payload, dict):
+                        log.debug("JSON ist kein Objekt, ignoriert (Topic %s)", message.topic)
                         continue
 
                     # Keine eigene Dedupe-/Filterlogik hier: BOSWatch3 liefert
@@ -49,5 +66,5 @@ async def start_mqtt_listener(app):
                     await learn_payload(db_path, entries, payload)
 
         except aiomqtt.MqttError as e:
-            print(f"[MQTT Error] {e}. Verbinde neu in 5 Sekunden...")
+            log.warning("MQTT-Verbindung gestört: %s. Neuer Versuch in 5 s", e)
             await asyncio.sleep(5)

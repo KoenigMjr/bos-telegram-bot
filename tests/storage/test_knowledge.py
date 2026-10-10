@@ -1,7 +1,6 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
 
 from bos_telegram_bot.storage import database as db
 from bos_telegram_bot.storage import knowledge
@@ -20,9 +19,6 @@ class TempDbCase(unittest.TestCase):
         self.tmp = tmp.name
         self.db_path = os.path.join(tmp.name, "bot.sqlite3")
         db.init_db(self.db_path)
-        quiet = patch("builtins.print")
-        quiet.start()
-        self.addCleanup(quiet.stop)
 
     def entry(self, csv_rows=None, learn=True):
         entry = make_entries(csv_rows=csv_rows)[0]

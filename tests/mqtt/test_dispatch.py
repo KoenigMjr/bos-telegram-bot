@@ -1,5 +1,4 @@
 import unittest
-from unittest.mock import patch
 
 from bos_telegram_bot.storage import database as db
 from bos_telegram_bot.core.matching import wildcard_to_regex
@@ -136,9 +135,139 @@ class LearningIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_learning_errors_never_propagate(self):
         env = Env(self)
-        with patch("builtins.print") as log:
+        with self.assertLogs("bos_telegram_bot.mqtt.dispatch", level="WARNING") as logged:
             await dispatch.learn_payload("/gibt/es/nicht/db.sqlite3", env.entries, {"ric": "1", "description": "A"})
-        self.assertIn("[Lernen] Fehler", log.call_args[0][0])
+        self.assertIn("Lernen fehlgeschlagen", logged.output[0])
+
+
+class DescribeAlarmTests(unittest.TestCase):
+    """Die Kennzeichnung für das INFO-Log: RIC und Name, nie der Alarmtext."""
+
+    def test_single_alarm(self):
+        self.assertEqual(dispatch.describe_alarm({"ric": "1000011", "description": "Wache Nord", "message": "THL 1"}),
+                         "1000011 (Wache Nord)")
+
+    def test_multicast_shows_all_rics_and_names(self):
+        payload = {"ric": "1000043", "ric_list": "1000011, 1000043",
+                   "description": "1000043", "description_list": "Lagedienst Musterstadt, 1000043"}
+        self.assertEqual(dispatch.describe_alarm(payload), "1000011, 1000043 (Lagedienst Musterstadt)")
+
+    def test_an_unresolved_name_that_is_just_the_ric_is_left_out(self):
+        self.assertEqual(dispatch.describe_alarm({"ric": "1000011", "description": "1000011"}), "1000011")
+
+    def test_many_recipients_are_shortened(self):
+        payload = {"ric_list": "1, 2, 3, 4, 5, 6"}
+        self.assertEqual(dispatch.describe_alarm(payload), "1, 2, 3 +3")
+
+    def test_long_names_are_cut(self):
+        label = dispatch.describe_alarm({"ric": "1", "description": "N" * 200})
+        self.assertLessEqual(len(label), len("1 ()") + dispatch.MAX_NAME_LENGTH)
+        self.assertTrue(label.endswith("…)"))
+
+    def test_duplicate_entries_collapse(self):
+        self.assertEqual(dispatch.describe_alarm({"ric_list": "1, 1, 2", "description_list": "A, A"}), "1, 2 (A)")
+
+    def test_fms_and_zvei_have_no_ric(self):
+        self.assertEqual(dispatch.describe_alarm({"fms": "12345678", "description": "Florian 1"}), "12345678 (Florian 1)")
+        self.assertEqual(dispatch.describe_alarm({"tone": "12345"}), "12345")
+
+    def test_nothing_known(self):
+        self.assertEqual(dispatch.describe_alarm({"message": "nur Text"}), "ohne Kennung")
+        self.assertEqual(dispatch.describe_alarm({}), "ohne Kennung")
+
+    def test_the_message_is_never_part_of_the_label(self):
+        label = dispatch.describe_alarm({"ric": "1", "message": "B 3 - Musterstraße 5", "description": "Wache"})
+        self.assertNotIn("Musterstraße", label)
+
+
+class FlakyBot:
+    """Schickt nur an bestimmte Chats erfolgreich, an alle anderen wirft er den Fehler, den Telegram bei Zeitüberschreitung liefert."""
+
+    def __init__(self, failing=()):
+        self.failing = set(failing)
+        self.sent = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        if chat_id in self.failing:
+            from telegram.error import TimedOut
+            raise TimedOut()
+        self.sent.append(chat_id)
+
+
+class AlarmLogTests(unittest.IsolatedAsyncioTestCase):
+    LOGGER = "bos_telegram_bot.mqtt.dispatch"
+    ALARM = {"ric": "1000011", "description": "Wache Nord", "message": "TEST Beispieltext (Musterstraße 5)"}
+
+    def setUp(self):
+        self.env = Env(self)
+        db.add_sub(self.env.db_path, 11, "ric", "1000011", "RIC: 1000011", False)
+
+    async def run_alarm(self, level, bot=None, payload=None):
+        app = type("App", (), {"bot": bot or self.env.bot})()
+        with self.assertLogs(self.LOGGER, level=level) as logged:
+            await dispatch.handle_payload(app, self.env.db_path, self.env.context.bot_data["active_fields"],
+                                          DEFAULT_TEMPLATE, payload or self.ALARM)
+        return logged.output
+
+    async def test_one_info_line_for_a_delivered_alarm(self):
+        output = await self.run_alarm("INFO")
+        self.assertEqual(output, [f"INFO:{self.LOGGER}:Alarm 1000011 (Wache Nord): 1 Abo(s) in 1 Chat(s), gesendet 1/1"])
+
+    async def test_one_info_line_without_a_matching_subscription(self):
+        output = await self.run_alarm("INFO", payload={"ric": "1000099", "description": "Wache Süd"})
+        self.assertEqual(output, [f"INFO:{self.LOGGER}:Alarm 1000099 (Wache Süd): kein passendes Abo"])
+
+    async def test_counts_subscriptions_and_chats_separately(self):
+        db.add_sub(self.env.db_path, 11, "message", ".*Beispiel.*", "Stichwort", True)
+        db.add_sub(self.env.db_path, 22, "ric", "1000011", "RIC: 1000011", False)
+        output = await self.run_alarm("INFO")
+        self.assertIn("3 Abo(s) in 2 Chat(s), gesendet 2/2", output[0])
+
+    async def test_a_failed_send_is_a_warning_with_the_reason(self):
+        output = await self.run_alarm("WARNING", bot=FlakyBot(failing=[11]))
+        self.assertEqual(len(output), 2)
+        self.assertEqual(output[0], f"WARNING:{self.LOGGER}:Senden an Chat 11 fehlgeschlagen (TimedOut: Timed out)")
+        self.assertIn("gesendet 0/1", output[1])
+        self.assertTrue(output[1].startswith("WARNING:"))
+
+    async def test_partial_failure_counts_what_arrived(self):
+        db.add_sub(self.env.db_path, 22, "ric", "1000011", "RIC: 1000011", False)
+        bot = FlakyBot(failing=[22])
+        output = await self.run_alarm("INFO", bot=bot)
+        self.assertEqual(bot.sent, [11])
+        self.assertIn("gesendet 1/2", output[-1])
+        self.assertTrue(output[-1].startswith("WARNING:"))
+
+    async def test_a_send_failure_never_raises(self):
+        await self.run_alarm("INFO", bot=FlakyBot(failing=[11]))     # kein Fehler nach außen
+
+    async def test_the_alarm_text_never_appears_at_info(self):
+        output = "\n".join(await self.run_alarm("INFO"))
+        self.assertNotIn("Beispieltext", output)
+        self.assertNotIn("Musterstraße", output)
+
+    async def test_debug_adds_matches_message_and_timing(self):
+        output = "\n".join(await self.run_alarm("DEBUG"))
+        self.assertRegex(output, r"Abo \d+ passt \(Chat 11, Feld ric, Ziel '1000011'\): RIC: 1000011")
+        self.assertIn("Nachricht an Chat 11:", output)
+        self.assertIn("Musterstraße 5", output)     # der volle Text ist nur auf DEBUG im Log
+        self.assertRegex(output, r"Chat 11: gesendet in \d+\.\d\d s")
+
+    async def test_debug_mentions_subscriptions_of_removed_fields(self):
+        db.add_sub(self.env.db_path, 33, "altes_feld", "x", "alt", False)
+        output = "\n".join(await self.run_alarm("DEBUG"))
+        self.assertIn("ruht: Feld 'altes_feld' ist nicht mehr konfiguriert", output)
+
+    async def test_multicast_alarm_label(self):
+        payload = {"ric": "1000043", "ric_list": "1000011, 1000043", "description": "1000043",
+                   "description_list": "Lagedienst Musterstadt, 1000043"}
+        output = await self.run_alarm("INFO", payload=payload)
+        self.assertIn("Alarm 1000011, 1000043 (Lagedienst Musterstadt): 1 Abo(s)", output[0])
+
+    async def test_learning_failure_is_a_warning_and_never_raises(self):
+        with self.assertLogs(self.LOGGER, level="WARNING") as logged:
+            await dispatch.learn_payload("/gibt/es/nicht/db.sqlite3", self.env.entries, {"ric": "1", "description": "A"})
+        self.assertIn("Lernen fehlgeschlagen", logged.output[0])
 
 
 if __name__ == "__main__":

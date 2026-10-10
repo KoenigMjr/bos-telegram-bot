@@ -5,11 +5,14 @@ verändert) und die Paare, die der Bot aus ankommenden Alarmen lernt (in der
 eigenen SQLite-Datenbank). Die CSV hat bei gleichem Wert Vorrang."""
 
 import csv
+import logging
 import os
 import re
 
 from bos_telegram_bot.core.matching import split_list_aligned
 from bos_telegram_bot.storage import database as db
+
+log = logging.getLogger(__name__)
 
 
 def load_csv(csv_path: str) -> list:
@@ -20,7 +23,7 @@ def load_csv(csv_path: str) -> list:
     if not csv_path:
         return []
     if not os.path.isfile(csv_path):
-        print(f"[CSV] Datei nicht gefunden, es werden nur gelernte Werte genutzt: {csv_path}")
+        log.warning("CSV nicht gefunden, es werden nur gelernte Werte genutzt: %s", csv_path)
         return []
 
     rows = []
@@ -37,11 +40,11 @@ def load_csv(csv_path: str) -> list:
                 try:
                     re.compile(clean_for)
                 except re.error as e:
-                    print(f"[CSV] {csv_path} Zeile {row_num} übersprungen (ungültiger Regex '{clean_for}'): {e}")
+                    log.warning("CSV %s, Zeile %d übersprungen (ungültiger Regex '%s'): %s", csv_path, row_num, clean_for, e)
                     continue
 
             rows.append({"for": clean_for, "add": (row.get("add") or "").strip(), "isRegex": is_regex})
-    print(f"[CSV] {len(rows)} Einträge geladen: {csv_path}")
+    log.info("CSV geladen: %d Einträge (%s)", len(rows), csv_path)
     return rows
 
 
@@ -118,5 +121,6 @@ def learn_from_payload(db_path: str, entries: list, payload: dict) -> int:
             if csv_covers(csv_rows, for_value):
                 continue
             db.upsert_learned(db_path, entry["for"], for_value, add_value)
+            log.debug("Gelernt: %s %s = %s", entry["for"], for_value, add_value)
             count += 1
     return count

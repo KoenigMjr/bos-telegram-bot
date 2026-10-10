@@ -37,6 +37,10 @@ services:
       EXTRA_FIELDS: ${EXTRA_FIELDS:-}
       # Pfad zur CSV mit RIC -> Name (siehe oben), z.B. /boswatch3-config/descriptions_ric.csv
       CSV_PATH_RIC: ${CSV_PATH_RIC:-}
+      # Ausführlichkeit der Logs: INFO (Standard) oder DEBUG für die Fehlersuche (siehe README, Logs)
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      # Zeitzone der Logzeiten, z.B. Europe/Berlin (ohne Angabe: UTC)
+      TZ: ${TZ:-}
 
 # Nur nötig, wenn oben das Docker-Volume "bot-data" statt des Ordners genutzt wird:
 # volumes:

@@ -3,15 +3,19 @@
 Reihenfolge (später gewinnt):
   1. mitgelieferte config.yaml (Standardwerte, im Image, immer aktuell)
   2. optionale eigene Datei (CONFIG_PATH oder data/config.yaml) mit nur den Abweichungen
-  3. Umgebungsvariablen (MQTT_*, DB_PATH, CSV_PATH_<FELD>, EXTRA_FIELDS)
+  3. Umgebungsvariablen (MQTT_*, DB_PATH, CSV_PATH_<FELD>, EXTRA_FIELDS, LOG_LEVEL)
 """
 
+import logging
 import os
 import re
 
 import yaml
 
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE, FIELD_NAME, template_from_fields, validate_template
+from bos_telegram_bot.logs import LEVELS, normalize_level
+
+log = logging.getLogger(__name__)
 
 # Die mitgelieferte config.yaml liegt im Hauptordner (im Image bzw. Repo), eine Ebene über dem Paket.
 BUNDLED_CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.yaml")
@@ -149,6 +153,11 @@ def validate_config(config: dict, path: str) -> None:
     """Prüft die fertig zusammengesetzte Konfiguration und nennt alle Probleme
     auf einmal, statt mit einem KeyError abzubrechen."""
     problems = []
+    log_block = config.get("logging")
+    if "logging" in config and not isinstance(log_block, dict):
+        problems.append("logging muss ein Block sein, z.B. 'logging:' mit 'level: INFO' darunter")
+    elif isinstance(log_block, dict) and "level" in log_block and normalize_level(log_block["level"]) is None:
+        problems.append(f"logging.level muss eines von {', '.join(LEVELS)} sein (ist '{log_block['level']}')")
     if not config["files"].get("db_path"):
         problems.append("files.db_path fehlt")
     if not config["mqtt"].get("host"):
@@ -236,7 +245,7 @@ def load_config() -> dict:
         override = read_yaml(override_path)
         override_fields = override.pop("fields", None)
         config = deep_merge(config, override)
-        print(f"[Config] Eigene Anpassungen geladen: {override_path}")
+        log.info("Eigene Anpassungen geladen: %s", override_path)
     source = override_path or BUNDLED_CONFIG
 
     config["fields"] = merge_fields(base_fields, override_fields, source)
@@ -253,6 +262,10 @@ def load_config() -> dict:
     mqtt["topic"] = os.getenv("MQTT_TOPIC") or mqtt.get("topic")
     if os.getenv("DB_PATH"):
         config["files"]["db_path"] = os.getenv("DB_PATH")
+    if os.getenv("LOG_LEVEL"):
+        if not isinstance(config.get("logging"), dict):
+            config["logging"] = {}
+        config["logging"]["level"] = os.getenv("LOG_LEVEL")
 
     # EXTRA_FIELDS=feld1,feld2 legt für jedes Feld aus dem MQTT-JSON einen Befehl
     # an (z.B. Felder, die das BOSWatch3-Modul 'descriptor' ergänzt).
@@ -263,6 +276,8 @@ def load_config() -> dict:
             known.add(name)
 
     validate_config(config, source)
+    log_settings = config.setdefault("logging", {})
+    log_settings["level"] = normalize_level(log_settings.get("level", "INFO"))
     normalize_entries(config)
     resolve_csv_paths(config)
     return config
