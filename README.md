@@ -32,6 +32,8 @@ die Alarme als JSON sendet.
    | `MQTT_TOPIC`         | nein    | Standard `homeassistant/boswatch/alarm/+`           |
    | `CSV_PATH_RIC`       | nein    | CSV mit RIC → Name, siehe [Namen für RIC und Fahrzeuge](#namen-für-ric-und-fahrzeuge) |
    | `EXTRA_FIELDS`       | nein    | Weitere Felder aus dem Alarm als Befehl, z.B. `stadtteil,objekt` |
+   | `LOG_LEVEL`          | nein    | Standard `INFO`, für die Fehlersuche `DEBUG`, siehe [Logs](#logs) |
+   | `TZ`                 | nein    | Zeitzone der Logzeiten, z.B. `Europe/Berlin` (Standard: UTC)       |
 
 4. **Dem Bot `/start` schreiben.** Fertig.
 
@@ -445,6 +447,63 @@ dafür nicht geändert werden — Bots sehen Befehle (`/...`) in Gruppen immer,
 unabhängig vom Privacy Mode; der betrifft nur normale Textnachrichten ohne
 Slash-Befehl.
 
+## Logs
+
+Der Bot schreibt auf die Standardausgabe. In Portainer: Container → **Logs**, auf der Kommandozeile
+`docker logs -f bos-telegram-bot`.
+
+**INFO** (Standard) zeigt eine kurze Zeile pro Ereignis:
+
+```
+2026-10-09 08:56:54+0200 INFO    mqtt.listener: Verbunden mit MQTT-Broker 192.168.1.100:1883, lausche auf Topic homeassistant/boswatch/alarm/+
+2026-10-09 08:57:28+0200 INFO    mqtt.dispatch: Alarm 1234567 (Wache Nord): 2 Abo(s) in 1 Chat(s), gesendet 1/1
+2026-10-09 08:58:03+0200 INFO    mqtt.dispatch: Alarm 1234599 (Wache Süd): kein passendes Abo
+2026-10-09 08:58:40+0200 WARNING mqtt.dispatch: Senden an Chat -1001234567890 fehlgeschlagen (TimedOut: Timed out)
+2026-10-09 08:58:40+0200 WARNING mqtt.dispatch: Alarm 1234567 (Wache Nord): 1 Abo(s) in 1 Chat(s), gesendet 0/1
+2026-10-09 08:59:12+0200 INFO    chat.fields: Abo gesetzt: Chat 123456789, Feld ric, Wert '1234567'
+```
+
+So liest man die Alarmzeile: `2 Abo(s) in 1 Chat(s), gesendet 1/1` heißt, zwei Abos passen, beide gehören zu
+einem Chat, und Telegram hat die eine Nachricht angenommen. Pro Chat geht immer genau eine Nachricht
+raus. Steht dort `gesendet 0/1`, kam die Nachricht nicht durch, der Grund steht in der Zeile davor.
+`TimedOut` heißt, dass Telegram nicht rechtzeitig geantwortet hat. Die Nachricht kann trotzdem angekommen
+sein.
+
+Außerdem steht im INFO-Log, wer wann Abos angelegt oder entfernt hat und wer von einem Admin freigeschaltet,
+abgelehnt oder gesperrt wurde (jeweils mit Telegram-ID, ohne Namen).
+
+**Der Alarmtext steht bewusst nie im INFO-Log**, er kann Adressen und andere persönliche Angaben enthalten.
+Die Alarmzeile nennt nur RIC und Name.
+
+**DEBUG** zeigt zusätzlich die Rohdaten, zum Beispiel für die Frage "warum kam der Alarm nicht an?":
+
+- jede Nachricht vom Broker mit Topic, QoS, retain-Flag und dem kompletten Payload
+- warum etwas ignoriert wurde (kein JSON, leere Nachricht)
+- welches Abo auf welchen Wert gepasst hat
+- die fertige Nachricht pro Chat und wie lange Telegram zum Annehmen gebraucht hat
+- jede Anfrage des Bots an Telegram, auch das regelmäßige Abfragen neuer Nachrichten (deshalb viele Zeilen)
+
+DEBUG enthält die Alarmtexte. Nur zur Fehlersuche einschalten und das Log danach nicht aufbewahren.
+
+**Einstellen:** Umgebungsvariable `LOG_LEVEL` (`DEBUG`, `INFO`, `WARNING`, `ERROR`) oder in
+`data/config.yaml`:
+
+```yaml
+logging:
+  level: DEBUG
+```
+
+Die Umgebungsvariable gewinnt. Nach einer Änderung den Container neu starten. Ein ungültiger Wert
+stoppt den Start mit einer Erklärung.
+
+**Zeitzone:** Die Zeiten stehen in der Zeitzone des Containers, ohne Angabe ist das UTC (`+0000`). Für
+Ortszeit die Variable `TZ` setzen, z.B. `Europe/Berlin`. Der Versatz steht in jeder Zeile, deshalb lassen
+sich die Zeiten auch mit denen des Brokers vergleichen.
+
+**Das Token des Bots wird in jeder Logzeile geschwärzt** (`bot<TOKEN>`), auch in Fehlermeldungen der
+verwendeten Bibliotheken. Ein Log lässt sich deshalb gefahrlos für eine Fehlersuche weitergeben, der
+Alarminhalt bei DEBUG aber nicht.
+
 ## Datensicherung und was der Bot schreibt
 
 Alles, was der Bot sich merkt, liegt im Datenordner (Standard
@@ -528,6 +587,7 @@ config.yaml                Standardkonfiguration, steckt im Image
 bos_telegram_bot/
   app.py                   Verdrahtung: Konfiguration, Datenbank, Telegram-Befehle, Start
   config.py                Konfiguration laden, zusammenführen und prüfen
+  logs.py                  Logging: Format, Pegel, Schwärzen des Tokens
   core/                    reine Logik, ohne Telegram und ohne Datenbank
     matching.py              Muster, Platzhalter, "Zahl+", Abgleich mit Multicast-Listen
     template.py              Aufbau der Alarm-Nachricht
@@ -550,7 +610,8 @@ tests/                     spiegelt diese Struktur
 ```
 
 Die Schichten bauen aufeinander auf: `core` kennt weder Telegram noch die Datenbank, `storage` kennt
-kein Telegram, `mqtt` und `chat` nutzen beide `core` und `storage`, kennen sich aber nicht. Ein Test
+kein Telegram, `mqtt` und `chat` nutzen beide `core` und `storage`, kennen sich aber nicht. `logs.py` ist
+neutral und darf von überall genutzt werden. Ein Test
 (`tests/test_architecture.py`) hält diese Regeln ein.
 
 ## Für Maintainer: Image veröffentlichen
