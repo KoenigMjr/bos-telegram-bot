@@ -6,7 +6,11 @@ WARNING/ERROR  Probleme, die Aufmerksamkeit brauchen
 
 Geschrieben wird auf die Standardausgabe, dort holt sie Docker bzw. Portainer ab. Das Token des Bots
 wird in jeder Ausgabe geschwärzt, auch in Fehlermeldungen der Bibliotheken (die URL der Telegram-API
-enthält es)."""
+enthält es).
+
+Jeder Eintrag steht in einer Zeile. Docker zerlegt mehrzeilige Einträge in einzelne Zeilen ohne Zeitstempel,
+und Oberflächen wie Portainer können dabei Zeichen verfälschen. Zeilenumbrüche in einer Meldung (z.B. in der
+Alarmnachricht) erscheinen deshalb als Zeichen ⏎. Nur der Traceback eines Fehlers bleibt mehrzeilig."""
 
 import logging
 import re
@@ -21,6 +25,7 @@ _LIBRARIES = ("httpx", "telegram", "apscheduler", "aiomqtt", "paho")
 _NOISY = ("httpcore", "hpack", "asyncio")
 
 _TOKEN_IN_URL = re.compile(r"bot\d{6,}:[A-Za-z0-9_-]{20,}")
+_LINE_BREAKS = re.compile(r"\s*[\r\n]\s*")        # ein Umbruch samt umgebendem Leerraum, auch mehrere hintereinander
 _MARKER = "_bos_telegram_bot_handler"
 
 
@@ -36,6 +41,10 @@ class RedactingFormatter(logging.Formatter):
     def __init__(self, secrets=()):
         super().__init__("%(asctime)s %(levelname)-7s %(short_name)s: %(message)s", "%Y-%m-%d %H:%M:%S%z")
         self.secrets = [s for s in secrets if s]
+
+    def formatMessage(self, record):
+        record.message = _LINE_BREAKS.sub(" ⏎ ", record.message)     # nur die Meldung, nicht den Traceback
+        return super().formatMessage(record)
 
     def format(self, record):
         prefix = PACKAGE + "."

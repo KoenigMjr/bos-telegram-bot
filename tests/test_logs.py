@@ -184,5 +184,69 @@ class RedactionTests(LoggingTestCase):
         self.assertIn("https://example.org/bot123/info", self.out.getvalue())
 
 
+class SingleLineTests(LoggingTestCase):
+    """Docker zerlegt mehrzeilige Einträge und Portainer kann dabei Zeichen verfälschen: jeder Eintrag bleibt eine Zeile."""
+
+    def emit(self, message, *args, level="INFO"):
+        logs.setup_logging("DEBUG")
+        logging.getLogger("bos_telegram_bot.x").log(getattr(logging, level), message, *args)
+
+    def test_line_breaks_become_one_visible_marker(self):
+        self.emit("Nachricht an Chat %s: %s", 4711, "Zeile 1\nZeile 2\nZeile 3")
+        (line,) = self.lines()
+        self.assertTrue(line.endswith("x: Nachricht an Chat 4711: Zeile 1 ⏎ Zeile 2 ⏎ Zeile 3"), line)
+
+    def test_blank_lines_and_indentation_collapse_into_one_marker(self):
+        self.emit("a\n\n\n   b  \n\tc")
+        (line,) = self.lines()
+        self.assertTrue(line.endswith("x: a ⏎ b ⏎ c"), line)
+
+    def test_windows_and_old_mac_line_breaks(self):
+        self.emit("a\r\nb\rc")
+        self.assertTrue(self.lines()[0].endswith("x: a ⏎ b ⏎ c"))
+
+    def test_a_message_without_line_breaks_is_unchanged(self):
+        self.emit("Alarm 1000011 (Wache Nord): 1 Abo(s) in 1 Chat(s), gesendet 1/1")
+        (line,) = self.lines()
+        self.assertTrue(line.endswith("x: Alarm 1000011 (Wache Nord): 1 Abo(s) in 1 Chat(s), gesendet 1/1"))
+        self.assertNotIn("⏎", line)
+
+    def test_every_entry_starts_with_a_timestamp(self):
+        logs.setup_logging("DEBUG")
+        log = logging.getLogger("bos_telegram_bot.x")
+        for text in ("eins", "zwei\nzeilen", "drei\n\nmit\nvielen\nzeilen"):
+            log.info(text)
+        self.assertEqual(len(self.lines()), 3)
+        self.assertTrue(all(LINE.match(line) for line in self.lines()), self.lines())
+
+    def test_emoji_and_html_survive(self):
+        self.emit("🚨 <b>BOS-ALARM</b> 🚨\n\nWache Nord\n<i>abonniert über: RIC</i>")
+        self.assertIn("🚨 <b>BOS-ALARM</b> 🚨 ⏎ Wache Nord ⏎ <i>abonniert über: RIC</i>", self.lines()[0])
+
+    def test_a_traceback_stays_readable_on_several_lines(self):
+        logs.setup_logging("INFO")
+        try:
+            raise RuntimeError("kaputt")
+        except RuntimeError:
+            logging.getLogger("bos_telegram_bot.x").exception("Fehler\nmit Umbruch")
+        lines = self.lines()
+        self.assertTrue(lines[0].endswith("x: Fehler ⏎ mit Umbruch"), lines[0])     # die Meldung ist eine Zeile
+        self.assertEqual(lines[1], "Traceback (most recent call last):")             # der Traceback bleibt mehrzeilig
+        self.assertTrue(lines[-1].startswith("RuntimeError: kaputt"))
+
+    def test_redaction_still_applies_to_multiline_messages(self):
+        logs.setup_logging("INFO", secrets=[TOKEN])
+        logging.getLogger("bos_telegram_bot.x").info("zeile 1\nToken %s", TOKEN)
+        self.assertNotIn(TOKEN, self.out.getvalue())
+        self.assertIn("zeile 1 ⏎ Token <TOKEN>", self.out.getvalue())
+
+    def test_the_record_seen_by_other_handlers_keeps_its_original_text(self):
+        """assertLogs & Co. sehen den Text ohne Marker, nur unsere Ausgabe wird umgeformt."""
+        logs.setup_logging("INFO")
+        with self.assertLogs("bos_telegram_bot.x", level="INFO") as logged:
+            logging.getLogger("bos_telegram_bot.x").info("a\nb")
+        self.assertEqual(logged.records[0].getMessage(), "a\nb")
+
+
 if __name__ == "__main__":
     unittest.main()

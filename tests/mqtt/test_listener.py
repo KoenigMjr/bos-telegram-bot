@@ -32,7 +32,7 @@ class FakeBroker:
 
     def __call__(self, **params):
         session = self.sessions.pop(0) if self.sessions else []
-        client = NS(params=params, subscribed=[], queued=[] if isinstance(session, Exception) else session)
+        client = NS(params=params, subscribed=[], subscribed_qos=[], queued=[] if isinstance(session, Exception) else session)
         self.clients.append(client)
 
         class Context:
@@ -40,8 +40,9 @@ class FakeBroker:
                 if isinstance(session, Exception):
                     raise session          # der Verbindungsaufbau schlägt fehl
 
-                async def subscribe(topic):
+                async def subscribe(topic, qos=0):
                     client.subscribed.append(topic)
+                    client.subscribed_qos.append(qos)
 
                 async def stream():
                     for item in client.queued:
@@ -134,6 +135,23 @@ class ListenerLoopTests(ListenerTestCase):
         self.assertEqual(client.params, {"hostname": "mqtt.test", "port": 1884, "username": "bot", "password": "geheim"})
         self.assertEqual(client.subscribed, ["homeassistant/boswatch/alarm/+"])
 
+    async def test_it_subscribes_with_qos_0_by_default(self):
+        broker, *_ = await self.run_listener(self.make_app(), [])
+        self.assertEqual(broker.clients[0].subscribed_qos, [0])
+
+    async def test_it_subscribes_with_the_configured_qos(self):
+        broker, *_ = await self.run_listener(self.make_app(qos=1), [])
+        self.assertEqual(broker.clients[0].subscribed_qos, [1])
+
+    async def test_the_qos_is_part_of_the_connect_line(self):
+        with self.assertLogs(LOGGER, level="INFO") as logged:
+            await self.run_listener(self.make_app(qos=1), [])
+        self.assertTrue(logged.output[0].endswith("lausche auf Topic homeassistant/boswatch/alarm/+ (QoS 1)"), logged.output[0])
+
+    async def test_every_reconnect_subscribes_again_with_the_same_qos(self):
+        broker, *_ = await self.run_listener(self.make_app(qos=1), [], [], stops_after=2)
+        self.assertEqual([c.subscribed_qos for c in broker.clients], [[1], [1]])
+
     async def test_empty_credentials_become_none(self):
         broker, *_ = await self.run_listener(self.make_app(), [])
         self.assertIsNone(broker.clients[0].params["username"])
@@ -142,7 +160,7 @@ class ListenerLoopTests(ListenerTestCase):
     async def test_connect_is_announced_at_info(self):
         with self.assertLogs(LOGGER, level="INFO") as logged:
             await self.run_listener(self.make_app(), [])
-        self.assertEqual(logged.output[0], f"INFO:{LOGGER}:Verbunden mit MQTT-Broker mqtt.test:1883, lausche auf Topic homeassistant/boswatch/alarm/+")
+        self.assertEqual(logged.output[0], f"INFO:{LOGGER}:Verbunden mit MQTT-Broker mqtt.test:1883, lausche auf Topic homeassistant/boswatch/alarm/+ (QoS 0)")
 
     async def test_a_lost_connection_is_a_warning_and_waits_five_seconds(self):
         with self.assertLogs(LOGGER, level="WARNING") as logged:

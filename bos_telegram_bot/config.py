@@ -152,6 +152,17 @@ def check_config_sections(config: dict, path: str) -> None:
         raise SystemExit(f"{path}: Abschnitt fehlt oder ist leer: {', '.join(missing)}")
 
 
+def parse_qos(value):
+    """QoS als 0 oder 1 (als Zahl oder als Text, etwa aus einer Umgebungsvariable). Sonst None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value in (0, 1) else None
+    if isinstance(value, str) and value.strip() in ("0", "1"):
+        return int(value.strip())
+    return None
+
+
 def validate_config(config: dict, path: str) -> None:
     """Prüft die fertig zusammengesetzte Konfiguration und nennt alle Probleme
     auf einmal, statt mit einem KeyError abzubrechen."""
@@ -172,6 +183,9 @@ def validate_config(config: dict, path: str) -> None:
         problems.append("files.db_path fehlt")
     if not config["mqtt"].get("host"):
         problems.append("mqtt.host fehlt (oder Umgebungsvariable MQTT_HOST setzen)")
+    if "qos" in config["mqtt"] and parse_qos(config["mqtt"]["qos"]) is None:
+        problems.append(f"mqtt.qos muss 0 oder 1 sein (ist '{config['mqtt']['qos']}'): 0 = höchstens einmal (Standard), "
+                        f"1 = mindestens einmal")
     block = config.get("notification")
     if "notification" in config and not isinstance(block, dict):
         problems.append("notification muss ein Block sein, z.B. 'notification:' mit 'template: |' darunter")
@@ -270,6 +284,8 @@ def load_config() -> dict:
     mqtt["username"] = os.getenv("MQTT_USERNAME") or mqtt.get("username")
     mqtt["password"] = os.getenv("MQTT_PASSWORD") or mqtt.get("password")
     mqtt["topic"] = os.getenv("MQTT_TOPIC") or mqtt.get("topic")
+    if os.getenv("MQTT_QOS"):
+        mqtt["qos"] = os.getenv("MQTT_QOS")
     if os.getenv("DB_PATH"):
         config["files"]["db_path"] = os.getenv("DB_PATH")
     if os.getenv("LOG_LEVEL"):
@@ -286,6 +302,7 @@ def load_config() -> dict:
             known.add(name)
 
     validate_config(config, source)
+    config["mqtt"]["qos"] = parse_qos(config["mqtt"].get("qos", 0))
     log_settings = config.setdefault("logging", {})
     log_settings["level"] = normalize_level(log_settings.get("level", "INFO"))
     duplicate_settings = config.setdefault("duplicates", {})

@@ -314,6 +314,57 @@ class DuplicateSettingsTests(ConfigTestCase):
         self.assertIn("logging.level", message)
 
 
+class MqttQosTests(ConfigTestCase):
+    def test_default_is_0(self):
+        self.assertEqual(self.load()["mqtt"]["qos"], 0)
+
+    def test_value_from_the_override_file(self):
+        self.assertEqual(self.load("mqtt:\n  qos: 1\n")["mqtt"]["qos"], 1)
+
+    def test_environment_variable(self):
+        self.assertEqual(self.load(MQTT_QOS="1")["mqtt"]["qos"], 1)
+
+    def test_environment_beats_the_file_in_both_directions(self):
+        self.assertEqual(self.load("mqtt:\n  qos: 1\n", MQTT_QOS="0")["mqtt"]["qos"], 0)
+        self.assertEqual(self.load("mqtt:\n  qos: 0\n", MQTT_QOS="1")["mqtt"]["qos"], 1)
+
+    def test_the_result_is_always_a_number(self):
+        for value in ("0", "1", " 1 "):
+            self.assertIsInstance(self.load(MQTT_QOS=value)["mqtt"]["qos"], int, value)
+        self.assertEqual(self.load('mqtt:\n  qos: "1"\n')["mqtt"]["qos"], 1)       # Text aus der YAML-Datei
+
+    def test_empty_environment_value_is_ignored(self):
+        self.assertEqual(self.load("mqtt:\n  qos: 1\n", MQTT_QOS="")["mqtt"]["qos"], 1)
+
+    def test_null_in_the_file_falls_back_to_the_default(self):
+        self.assertEqual(self.load("mqtt:\n  qos: null\n")["mqtt"]["qos"], 0)
+
+    def test_everything_but_0_and_1_is_refused_with_an_explanation(self):
+        for bad in ("2", "-1", "viel", "1.5", "1.0", "true", "[1]", "01x"):
+            message = self.expect_exit(f"mqtt:\n  qos: {bad}\n")
+            self.assertIn("mqtt.qos muss 0 oder 1 sein", message, bad)
+            self.assertIn("0 = höchstens einmal (Standard), 1 = mindestens einmal", message, bad)
+
+    def test_an_invalid_environment_value_is_refused_too(self):
+        for bad in ("2", "-1", "hoch", "1.0", "eins"):
+            self.assertIn("mqtt.qos muss 0 oder 1 sein", self.expect_exit(MQTT_QOS=bad), bad)
+            os.environ.pop("MQTT_QOS", None)
+
+    def test_the_wrong_value_is_named_in_the_message(self):
+        self.assertIn("(ist '2')", self.expect_exit(MQTT_QOS="2"))
+
+    def test_reported_together_with_other_problems(self):
+        message = self.expect_exit("mqtt:\n  qos: 7\nlogging:\n  level: laut\n")
+        self.assertIn("mqtt.qos", message)
+        self.assertIn("logging.level", message)
+
+    def test_parse_qos_directly(self):
+        for good, expected in ((0, 0), (1, 1), ("0", 0), ("1", 1), (" 1", 1)):
+            self.assertEqual(cfg.parse_qos(good), expected, good)
+        for bad in (2, -1, "2", "", None, True, False, 1.0, [], "0.0"):
+            self.assertIsNone(cfg.parse_qos(bad), repr(bad))
+
+
 class CommandMapTests(ConfigTestCase):
     def test_collision_with_builtin_command(self):
         self.assertIn("Befehlsname-Kollision", self._collision("fields:\n  - for: start\n"))
