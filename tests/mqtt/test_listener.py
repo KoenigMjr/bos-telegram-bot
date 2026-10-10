@@ -1,11 +1,16 @@
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
 
 import aiomqtt
 
-from bos_telegram_bot.mqtt import listener
+from bos_telegram_bot.core.delivery import DeliveryMemory, alarm_key
+from bos_telegram_bot.core.template import DEFAULT_TEMPLATE
+from bos_telegram_bot.mqtt import dispatch, listener
+from bos_telegram_bot.storage import database as db
+from tests.helpers import Env
 
 LOGGER = "bos_telegram_bot.mqtt.listener"
 TOPIC = "homeassistant/boswatch/alarm/1000011"
@@ -26,12 +31,15 @@ class FakeBroker:
         self.clients = []
 
     def __call__(self, **params):
-        client = NS(params=params, subscribed=[], queued=self.sessions.pop(0) if self.sessions else [])
+        session = self.sessions.pop(0) if self.sessions else []
+        client = NS(params=params, subscribed=[], queued=[] if isinstance(session, Exception) else session)
         self.clients.append(client)
-        broker = self
 
         class Context:
             async def __aenter__(self_inner):
+                if isinstance(session, Exception):
+                    raise session          # der Verbindungsaufbau schlägt fehl
+
                 async def subscribe(topic):
                     client.subscribed.append(topic)
 
@@ -73,7 +81,9 @@ class LogIncomingTests(unittest.TestCase):
                 listener.log_incoming("t", 0, False, ALARM)
 
 
-class ListenerLoopTests(unittest.IsolatedAsyncioTestCase):
+class ListenerTestCase(unittest.IsolatedAsyncioTestCase):
+    """Gemeinsame Hilfen, selbst ohne Tests."""
+
     def make_app(self, **mqtt):
         conf = {"host": "mqtt.test", "port": 1883, "username": "", "password": "", "topic": "homeassistant/boswatch/alarm/+"}
         conf.update(mqtt)
@@ -82,22 +92,24 @@ class ListenerLoopTests(unittest.IsolatedAsyncioTestCase):
             "entries": ["entries"], "active_fields": {"ric"}, "notification_template": "{RIC}", "last_payload": None,
         })
 
-    async def run_listener(self, app, *sessions, stops_after=1):
+    async def run_listener(self, app, *sessions, stops_after=1, handle=None):
         """Lässt den Listener laufen, bis er zum stops_after-ten Mal wartet, und beendet ihn dann."""
         broker = FakeBroker(*sessions)
         sleep = AsyncMock(side_effect=[None] * (stops_after - 1) + [asyncio.CancelledError()])
-        handle, learn = AsyncMock(), AsyncMock()
+        handle, learn = handle or AsyncMock(), AsyncMock()
         with patch.object(listener.aiomqtt, "Client", broker), patch.object(listener.asyncio, "sleep", sleep), \
                 patch.object(listener, "handle_payload", handle), patch.object(listener, "learn_payload", learn):
             with self.assertRaises(asyncio.CancelledError):
                 await listener.start_mqtt_listener(app)
         return broker, handle, learn, sleep
 
+
+class ListenerLoopTests(ListenerTestCase):
     async def test_an_alarm_is_passed_on_and_remembered_as_last_payload(self):
         app = self.make_app()
         _, handle, learn, _ = await self.run_listener(app, [message(ALARM)])
         expected = {"ric": "1000011", "description": "Wache Nord", "message": "TEST"}
-        handle.assert_awaited_once_with(app, "unused.sqlite3", {"ric"}, "{RIC}", expected)
+        handle.assert_awaited_once_with(app, "unused.sqlite3", {"ric"}, "{RIC}", expected, None)   # None: kein Gedächtnis
         learn.assert_awaited_once_with("unused.sqlite3", ["entries"], expected)
         self.assertEqual(app.bot_data["last_payload"], expected)
 
@@ -159,6 +171,166 @@ class ListenerLoopTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs(LOGGER, level="INFO") as logged:
             await self.run_listener(self.make_app(), [message("kein json"), message("")])
         self.assertEqual(len(logged.output), 2)            # nur "Verbunden" und "Verbindung gestört"
+
+
+ALARM_COPY = '{"timestamp": "1700000000.1", "ric": "1000011", "republished": true}'
+ALARM_ORIGINAL = '{"timestamp": "1700000000.1", "ric": "1000011"}'
+
+
+class RepeatedAlarmTests(ListenerTestCase):
+    """Der Listener mit Gedächtnis für doppelte Alarme."""
+
+    def app_with_memory(self):
+        app = self.make_app()
+        app.bot_data["delivered"] = DeliveryMemory(300)
+        return app
+
+    @staticmethod
+    def registering_handle():
+        """Ein handle_payload, das den Alarm wie das echte im Gedächtnis einträgt."""
+        async def handle(app, db_path, fields, template, payload, delivered):
+            delivered.register(alarm_key(payload))
+        return AsyncMock(side_effect=handle)
+
+    async def test_the_memory_is_passed_to_handle_payload(self):
+        app = self.app_with_memory()
+        _, handle, _, _ = await self.run_listener(app, [message(ALARM_ORIGINAL)])
+        self.assertIs(handle.await_args.args[5], app.bot_data["delivered"])
+
+    async def test_a_repeat_is_neither_learned_again_nor_shown_as_last_payload(self):
+        app = self.app_with_memory()
+        _, handle, learn, _ = await self.run_listener(
+            app, [message(ALARM_ORIGINAL), message(ALARM_COPY)], handle=self.registering_handle())
+        self.assertEqual(handle.await_count, 2)                    # die Verteilung sieht beide (für Wiederholungen)
+        self.assertEqual(learn.await_count, 1)                     # gelernt wird nur einmal
+        self.assertNotIn("republished", app.bot_data["last_payload"])   # /lastraw zeigt das Original
+
+    async def test_a_new_alarm_after_a_repeat_is_shown_and_learned(self):
+        app = self.app_with_memory()
+        other = '{"timestamp": "1700000999.9", "ric": "1000043"}'
+        _, _, learn, _ = await self.run_listener(
+            app, [message(ALARM_ORIGINAL), message(ALARM_COPY), message(other)], handle=self.registering_handle())
+        self.assertEqual(learn.await_count, 2)
+        self.assertEqual(app.bot_data["last_payload"]["ric"], "1000043")
+
+    async def test_a_copy_without_its_original_counts_as_new(self):
+        app = self.app_with_memory()
+        _, _, learn, _ = await self.run_listener(app, [message(ALARM_COPY)], handle=self.registering_handle())
+        self.assertEqual(learn.await_count, 1)
+        self.assertTrue(app.bot_data["last_payload"]["republished"])
+
+    async def test_without_a_memory_everything_counts_as_new(self):
+        app = self.make_app()                                      # kein "delivered" in bot_data
+        _, handle, learn, _ = await self.run_listener(app, [message(ALARM_ORIGINAL), message(ALARM_COPY)])
+        self.assertEqual((handle.await_count, learn.await_count), (2, 2))
+
+    async def test_an_alarm_without_timestamp_is_always_new(self):
+        app = self.app_with_memory()
+        _, _, learn, _ = await self.run_listener(
+            app, [message('{"ric": "1"}'), message('{"ric": "1"}')], handle=self.registering_handle())
+        self.assertEqual(learn.await_count, 2)
+
+
+class WholeChainTests(unittest.IsolatedAsyncioTestCase):
+    """Broker -> Empfangsschleife -> echte Verteilung -> echte Datenbank -> Telegram. Nichts davon ist ersetzt,
+    nur der Broker (FakeBroker) und das Warten bei Verbindungsverlust."""
+
+    MERGED = {"ric_list": "1000011, 1000043", "description_list": "Wache Nord, Lagedienst Musterstadt",
+              "timestamp_list": "1700000000.1, 1700000000.4", "message": "TEST Beispieltext", "multicastMode": "complete"}
+    FIRST = dict(MERGED, ric="1000011", description="Wache Nord", timestamp="1700000000.1")
+    SECOND = dict(MERGED, ric="1000043", description="Lagedienst Musterstadt", timestamp="1700000000.4")
+
+    async def run_chain(self, env, memory, messages):
+        app = NS(bot=env.bot, bot_data={
+            "config": {"mqtt": {"host": "mqtt.test", "port": 1883, "topic": "alarm/+"}, "files": {"db_path": env.db_path}},
+            "entries": env.entries, "active_fields": env.context.bot_data["active_fields"],
+            "notification_template": DEFAULT_TEMPLATE, "last_payload": None, "delivered": memory,
+        })
+        sleep = AsyncMock(side_effect=asyncio.CancelledError())
+        with patch.object(listener.aiomqtt, "Client", FakeBroker(messages)), patch.object(listener.asyncio, "sleep", sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await listener.start_mqtt_listener(app)
+        return app
+
+    def burst(self):
+        """Die vier Nachrichten eines Multicasts, wie im echten Log: je Empfänger das Original und danach die
+        kompakt formatierte Kopie der Automation."""
+        def compact(payload):
+            return json.dumps(dict(payload, republished=True), separators=(",", ":"))
+        return [message(json.dumps(self.FIRST)), message(json.dumps(self.SECOND)),
+                message(compact(self.FIRST)), message(compact(self.SECOND))]
+
+    async def test_a_multicast_burst_of_four_messages_reaches_each_chat_once(self):
+        env = Env(self)
+        for chat, ric in ((11, "1000011"), (11, "1000043"), (22, "1000043")):
+            db.add_sub(env.db_path, chat, "ric", ric, f"RIC: {ric}", False)
+        env.bot.sent.clear()
+        app = await self.run_chain(env, DeliveryMemory(300), self.burst())
+        self.assertEqual(sorted(m["chat_id"] for m in env.bot.sent), [11, 22])
+        self.assertNotIn("republished", app.bot_data["last_payload"])             # /lastraw zeigt das Original
+
+    async def test_without_the_memory_the_same_burst_is_delivered_four_times_per_chat(self):
+        """Der Gegenbeweis: ohne Erkennung (remember_seconds: 0) ist es genau das beobachtete Verhalten."""
+        env = Env(self)
+        db.add_sub(env.db_path, 11, "ric", "1000011", "RIC: 1000011", False)
+        env.bot.sent.clear()
+        await self.run_chain(env, None, self.burst())
+        self.assertEqual([m["chat_id"] for m in env.bot.sent], [11, 11, 11, 11])
+
+    async def test_a_burst_is_learned_only_once_but_learns_every_recipient(self):
+        env = Env(self)
+        real = dispatch.knowledge.learn_from_payload
+        with patch.object(dispatch.knowledge, "learn_from_payload", wraps=real) as spy:
+            await self.run_chain(env, DeliveryMemory(300), self.burst())
+        self.assertEqual(spy.call_count, 1)                                        # nicht viermal
+        for ric, name in (("1000011", "Wache Nord"), ("1000043", "Lagedienst Musterstadt")):
+            self.assertEqual(db.get_learned(env.db_path, "ric", ric), name)        # beide Empfänger der Liste
+
+    async def test_without_the_memory_every_message_is_learned(self):
+        env = Env(self)
+        real = dispatch.knowledge.learn_from_payload
+        with patch.object(dispatch.knowledge, "learn_from_payload", wraps=real) as spy:
+            await self.run_chain(env, None, self.burst())
+        self.assertEqual(spy.call_count, 4)
+
+
+class ResilienceTests(ListenerTestCase):
+    """Ein Fehler bei einem Alarm darf die Schleife nie beenden: sonst bliebe der Bot taub, ohne dass es jemand merkt."""
+
+    async def test_an_error_while_processing_one_alarm_does_not_stop_the_next(self):
+        app = self.make_app()
+        handle = AsyncMock(side_effect=[RuntimeError("Datenbank gesperrt"), None])
+        second = '{"ric": "1000043"}'
+        with self.assertLogs(LOGGER, level="ERROR") as logged:
+            _, handle, learn, _ = await self.run_listener(app, [message(ALARM), message(second)], handle=handle)
+        self.assertEqual(handle.await_count, 2)
+        self.assertEqual(learn.await_count, 1)                     # gelernt wird nur, was verarbeitet werden konnte
+        self.assertIn("Alarm konnte nicht verarbeitet werden", logged.output[0])
+        self.assertIn(TOPIC, logged.output[0])
+        self.assertIn("Datenbank gesperrt", logged.output[0])       # Traceback steht dabei
+        self.assertIn("RuntimeError", logged.output[0])
+
+    async def test_the_failed_alarm_is_still_shown_as_last_payload(self):
+        app = self.make_app()
+        handle = AsyncMock(side_effect=RuntimeError("kaputt"))
+        with self.assertLogs(LOGGER, level="ERROR"):
+            await self.run_listener(app, [message(ALARM)], handle=handle)
+        self.assertEqual(app.bot_data["last_payload"]["ric"], "1000011")
+
+    async def test_an_unexpected_error_while_connecting_is_retried(self):
+        app = self.make_app()
+        with self.assertLogs(LOGGER, level="ERROR") as logged:
+            _, handle, _, sleep = await self.run_listener(
+                app, OSError("Netzwerk nicht erreichbar"), [message(ALARM)], stops_after=2)
+        self.assertEqual(handle.await_count, 1)                    # nach dem Fehler ging es weiter
+        self.assertEqual(sleep.await_args_list[0].args, (5,))
+        self.assertIn("Unerwarteter Fehler bei der MQTT-Verbindung", logged.output[0])
+        self.assertIn("Netzwerk nicht erreichbar", logged.output[0])
+
+    async def test_stopping_the_task_is_still_possible(self):
+        app = self.make_app()
+        broker, *_ = await self.run_listener(app, [])              # CancelledError wird nicht verschluckt
+        self.assertEqual(len(broker.clients), 1)
 
 
 if __name__ == "__main__":

@@ -280,6 +280,40 @@ class LoggingSettingsTests(ConfigTestCase):
         self.assertIn("match muss", message)
 
 
+class DuplicateSettingsTests(ConfigTestCase):
+    def test_default_is_five_minutes(self):
+        self.assertEqual(self.load()["duplicates"], {"remember_seconds": 300})
+
+    def test_value_from_the_override_file(self):
+        self.assertEqual(self.load("duplicates:\n  remember_seconds: 60\n")["duplicates"]["remember_seconds"], 60)
+
+    def test_zero_switches_it_off_and_is_valid(self):
+        self.assertEqual(self.load("duplicates:\n  remember_seconds: 0\n")["duplicates"]["remember_seconds"], 0)
+
+    def test_fractions_are_fine(self):
+        self.assertEqual(self.load("duplicates:\n  remember_seconds: 2.5\n")["duplicates"]["remember_seconds"], 2.5)
+
+    def test_invalid_values_are_explained(self):
+        for bad in ("-1", "viel", "true", "[1, 2]", '"300"'):
+            message = self.expect_exit(f"duplicates:\n  remember_seconds: {bad}\n")
+            self.assertIn("duplicates.remember_seconds", message, bad)
+            self.assertIn("0 = abgeschaltet", message, bad)
+
+    def test_duplicates_must_be_a_block(self):
+        self.assertIn("duplicates muss ein Block sein", self.expect_exit("duplicates: 300\n"))
+
+    def test_removing_the_block_falls_back_to_the_default(self):
+        self.assertEqual(self.load("duplicates: null\n")["duplicates"]["remember_seconds"], 300)
+
+    def test_an_empty_block_keeps_the_default(self):
+        self.assertEqual(self.load("duplicates: {}\n")["duplicates"]["remember_seconds"], 300)
+
+    def test_reported_together_with_other_problems(self):
+        message = self.expect_exit("duplicates:\n  remember_seconds: -5\nlogging:\n  level: laut\n")
+        self.assertIn("duplicates.remember_seconds", message)
+        self.assertIn("logging.level", message)
+
+
 class CommandMapTests(ConfigTestCase):
     def test_collision_with_builtin_command(self):
         self.assertIn("Befehlsname-Kollision", self._collision("fields:\n  - for: start\n"))

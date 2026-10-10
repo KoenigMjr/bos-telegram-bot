@@ -85,5 +85,14 @@ fields:
 logging:
   level: INFO
 
+# Derselbe Alarm kann mehrfach beim Bot ankommen: Eine Automation (z.B. in Home Assistant) kann ihn kurz nach
+# dem Original noch einmal veröffentlichen, und ein Multicast mit mehreren Empfängern kommt einmal je
+# Empfänger-Topic an. Der Bot erkennt das am Zeitstempel des Alarms, merkt sich für diese Zeit, an welche
+# Chats er schon ging, und sendet ihn an jeden Chat nur einmal. Was bei einem Chat nicht ankam (z.B.
+# Zeitüberschreitung), wird bei der nächsten Kopie noch einmal versucht. Das Gedächtnis liegt nur im
+# Speicher, ein Neustart leert es. Fehlt dem Alarm der Zeitstempel, wird er nie als doppelt erkannt.
+duplicates:
+  remember_seconds: 300    # 0 = nicht erkennen, jede Nachricht zustellen
+
 files:
   db_path: "data/bot_db.sqlite3"

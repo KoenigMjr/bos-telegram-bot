@@ -4,7 +4,8 @@ from bos_telegram_bot.storage import database as db
 from bos_telegram_bot.core.matching import wildcard_to_regex
 from bos_telegram_bot.mqtt import dispatch
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE, template_from_fields
-from tests.helpers import Env
+from bos_telegram_bot.core.delivery import DeliveryMemory
+from tests.helpers import Clock, Env
 
 NOTIFY = ["description", "message", "ric"]
 TEMPLATE = template_from_fields(NOTIFY)   # der Aufbau früherer Versionen
@@ -268,6 +269,161 @@ class AlarmLogTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs(self.LOGGER, level="WARNING") as logged:
             await dispatch.learn_payload("/gibt/es/nicht/db.sqlite3", self.env.entries, {"ric": "1", "description": "A"})
         self.assertIn("Lernen fehlgeschlagen", logged.output[0])
+
+
+# Ein Multicast mit zwei Empfängern, wie ihn BOSWatch3 veröffentlicht: der zusammengeführte Alarm geht auf
+# das Topic jedes Empfängers, und eine Automation veröffentlicht jede Nachricht danach noch einmal.
+MERGED = {
+    "ric_list": "1000011, 1000043", "description_list": "Wache Nord, Lagedienst Musterstadt",
+    "timestamp_list": "1700000000.1, 1700000000.4", "message": "TEST Beispieltext",
+    "multicastMode": "complete", "multicastRecipientCount": "2",
+}
+FIRST = dict(MERGED, ric="1000011", description="Wache Nord", timestamp="1700000000.1", multicastRecipientIndex="1")
+SECOND = dict(MERGED, ric="1000043", description="Lagedienst Musterstadt", timestamp="1700000000.4", multicastRecipientIndex="2")
+SINGLE = {"ric": "1000011", "description": "Wache Nord", "message": "TEST", "timestamp": "1700000500.5", "timestamp_list": "1700000500.5"}
+
+
+def copy_of(payload):
+    """Die zweite Veröffentlichung derselben Nachricht durch eine Automation."""
+    return dict(payload, republished=True)
+
+
+class DuplicateTests(unittest.IsolatedAsyncioTestCase):
+    LOGGER = "bos_telegram_bot.mqtt.dispatch"
+
+    def setUp(self):
+        self.env = Env(self)
+        self.clock = Clock()
+        self.memory = DeliveryMemory(300, clock=self.clock)
+
+    def sub(self, chat, field, target):
+        db.add_sub(self.env.db_path, chat, field, target, f"{field}: {target}", False)
+
+    async def deliver(self, payload, bot=None, memory="default"):
+        """Eine MQTT-Nachricht verarbeiten. Gibt die Chats zurück, an die gesendet wurde."""
+        bot = bot or FlakyBot()
+        memory = self.memory if memory == "default" else memory
+        app = type("App", (), {"bot": bot})()
+        await dispatch.handle_payload(app, self.env.db_path, self.env.context.bot_data["active_fields"],
+                                      DEFAULT_TEMPLATE, payload, memory)
+        return bot.sent
+
+    async def test_an_alarm_and_its_copy_are_sent_once(self):
+        self.sub(11, "ric", "1000011")
+        sent = []
+        for message in (SINGLE, copy_of(SINGLE)):
+            sent += await self.deliver(message)
+        self.assertEqual(sent, [11])
+
+    async def test_a_copy_without_the_republished_flag_is_recognized_too(self):
+        self.sub(11, "ric", "1000011")
+        sent = await self.deliver(SINGLE) + await self.deliver(dict(SINGLE))
+        self.assertEqual(sent, [11])
+
+    async def test_four_messages_of_a_multicast_reach_every_chat_exactly_once(self):
+        self.sub(11, "ric", "1000011")
+        self.sub(11, "ric", "1000043")
+        self.sub(22, "ric", "1000043")
+        sent = []
+        for message in (FIRST, SECOND, copy_of(FIRST), copy_of(SECOND)):       # Reihenfolge wie im echten Log
+            sent += await self.deliver(message)
+        self.assertEqual(sorted(sent), [11, 22])
+
+    async def test_each_chat_gets_one_message_even_if_it_only_matches_the_second_topic(self):
+        self.sub(22, "ric", "1000043")
+        sent = []
+        for message in (FIRST, SECOND, copy_of(FIRST), copy_of(SECOND)):
+            sent += await self.deliver(message)
+        self.assertEqual(sent, [22])
+
+    async def test_info_shows_one_line_for_the_whole_burst(self):
+        self.sub(11, "ric", "1000011")
+        with self.assertLogs(self.LOGGER, level="INFO") as logged:
+            for message in (FIRST, SECOND, copy_of(FIRST), copy_of(SECOND)):
+                await self.deliver(message)
+        self.assertEqual(len(logged.output), 1)
+        self.assertIn("Alarm 1000011, 1000043 (Wache Nord, Lagedienst Musterstadt): 1 Abo(s) in 1 Chat(s), gesendet 1/1", logged.output[0])
+
+    async def test_debug_explains_what_was_skipped(self):
+        self.sub(11, "ric", "1000011")
+        await self.deliver(SINGLE)
+        with self.assertLogs(self.LOGGER, level="DEBUG") as logged:
+            await self.deliver(copy_of(SINGLE))
+        text = "\n".join(logged.output)
+        self.assertIn("Chat 11: Alarm schon zugestellt, übersprungen", text)
+        self.assertIn("Wiederholung, alle 1 Chat(s) schon beliefert", text)
+
+    async def test_a_failed_send_is_tried_again_by_the_copy(self):
+        self.sub(11, "ric", "1000011")
+        self.assertEqual(await self.deliver(SINGLE, bot=FlakyBot(failing=[11])), [])
+        self.assertFalse(self.memory.is_delivered("1700000500.5", 11))          # gescheitert zählt nicht als zugestellt
+        with self.assertLogs(self.LOGGER, level="INFO") as logged:
+            sent = await self.deliver(copy_of(SINGLE))
+        self.assertEqual(sent, [11])
+        self.assertIn("Wiederholung, 1 Chat(s) noch offen, gesendet 1/1", logged.output[0])
+        self.assertEqual(await self.deliver(copy_of(SINGLE)), [])                # jetzt ist es zugestellt
+
+    async def test_only_the_chat_that_failed_gets_the_retry(self):
+        self.sub(11, "ric", "1000011")
+        self.sub(22, "ric", "1000011")
+        first = await self.deliver(SINGLE, bot=FlakyBot(failing=[22]))
+        self.assertEqual(first, [11])
+        self.assertEqual(await self.deliver(copy_of(SINGLE)), [22])
+
+    async def test_a_retry_that_fails_again_is_a_warning_and_is_tried_once_more(self):
+        self.sub(11, "ric", "1000011")
+        await self.deliver(SINGLE, bot=FlakyBot(failing=[11]))
+        with self.assertLogs(self.LOGGER, level="WARNING") as logged:
+            await self.deliver(copy_of(SINGLE), bot=FlakyBot(failing=[11]))
+        self.assertTrue(any("Wiederholung, 1 Chat(s) noch offen, gesendet 0/1" in line for line in logged.output))
+        self.assertEqual(await self.deliver(copy_of(SINGLE)), [11])
+
+    async def test_a_copy_without_its_original_is_delivered_normally(self):
+        self.sub(11, "ric", "1000011")
+        self.assertEqual(await self.deliver(copy_of(SINGLE)), [11])
+
+    async def test_a_chat_subscribed_after_the_original_gets_the_copy(self):
+        self.sub(11, "ric", "1000011")
+        sent = await self.deliver(SINGLE)
+        self.sub(22, "ric", "1000011")
+        sent += await self.deliver(copy_of(SINGLE))
+        self.assertEqual(sent, [11, 22])
+
+    async def test_different_alarms_for_the_same_ric_are_both_delivered(self):
+        self.sub(11, "ric", "1000011")
+        later = dict(SINGLE, timestamp="1700000900.9", timestamp_list="1700000900.9")
+        self.assertEqual(await self.deliver(SINGLE) + await self.deliver(later), [11, 11])
+
+    async def test_an_alarm_without_timestamp_is_never_taken_for_a_duplicate(self):
+        self.sub(11, "ric", "1000011")
+        payload = {"ric": "1000011", "description": "Wache Nord"}
+        self.assertEqual(await self.deliver(payload) + await self.deliver(dict(payload)), [11, 11])
+
+    async def test_the_same_alarm_is_delivered_again_after_the_memory_expired(self):
+        self.sub(11, "ric", "1000011")
+        sent = await self.deliver(SINGLE)
+        self.clock.advance(301)
+        sent += await self.deliver(copy_of(SINGLE))
+        self.assertEqual(sent, [11, 11])
+
+    async def test_without_a_memory_every_message_is_delivered(self):
+        self.sub(11, "ric", "1000011")
+        sent = await self.deliver(SINGLE, memory=None) + await self.deliver(copy_of(SINGLE), memory=None)
+        self.assertEqual(sent, [11, 11])
+
+    async def test_no_subscriber_is_reported_once_per_alarm(self):
+        with self.assertLogs(self.LOGGER, level="INFO") as logged:
+            await self.deliver(FIRST)
+            await self.deliver(SECOND)
+            await self.deliver(copy_of(FIRST))
+        self.assertEqual(len(logged.output), 1)
+        self.assertIn("kein passendes Abo", logged.output[0])
+
+    async def test_a_repeat_is_reported_at_debug_when_nobody_subscribed(self):
+        await self.deliver(SINGLE)
+        with self.assertLogs(self.LOGGER, level="DEBUG") as logged:
+            await self.deliver(copy_of(SINGLE))
+        self.assertIn("Wiederholung, weiterhin kein passendes Abo", logged.output[0])
 
 
 if __name__ == "__main__":

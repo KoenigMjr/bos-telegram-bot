@@ -124,3 +124,16 @@ def make_callback(data, user_id=1, chat_id=None):
 def sent_text(mock):
     """Text des letzten Aufrufs eines reply_text/edit_message_text-Mocks."""
     return mock.call_args[0][0]
+
+
+class Clock:
+    """Eine Uhr, die nur vorgeht, wenn der Test es sagt."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
