@@ -1,0 +1,72 @@
+# Räumt alte Versionen des Images in der GitHub Container Registry auf.
+#
+# Jeder Push auf main setzt :latest auf das neue Image. Die vorige Version bleibt als namenlose Version zurück,
+# dazu kommen bei einem Image für zwei Architekturen mehrere Teilbausteine pro Build. Das summiert sich.
+#
+# Gelöscht werden NUR namenlose Versionen, die älter als eine Woche sind. Nie gelöscht werden:
+#   - Versionen mit Tag (:latest und alle Release-Tags wie :1.2.3 und :1.2)
+#   - die Teilbausteine (je Architektur) von Versionen mit Tag. Das erkennt die Action selbst und bricht
+#     lieber ab, als ein Image zu beschädigen.
+#   - alles, was jünger als eine Woche ist (damit ein laufender Build nie angefasst wird)
+# Eine versehentlich gelöschte Version lässt sich 30 Tage lang wiederherstellen (GitHub: Package settings).
+#
+# Einmalige Einrichtung: Auf GitHub unter Packages -> bos-telegram-bot -> Package settings -> "Manage Actions
+# access" das Repository hinzufügen und ihm die Rolle "Admin" geben. Ohne das darf das eingebaute Token nicht löschen.
+#
+# Erster Lauf: Actions -> "Alte Image-Versionen aufräumen" -> Run workflow. Das Häkchen "dry_run" ist vorbelegt,
+# es wird dann nichts gelöscht, das Log zeigt nur, was gelöscht würde. Erst danach mit abgewähltem Häkchen laufen lassen.
+name: Alte Image-Versionen aufräumen
+
+on:
+  schedule:
+    - cron: "17 3 * * 0"        # sonntags um 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Nur anzeigen, was gelöscht würde (es wird nichts gelöscht)"
+        type: boolean
+        default: true
+
+permissions:
+  packages: write
+
+# Nie zwei Aufräumläufe gleichzeitig.
+concurrency:
+  group: cleanup-images
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      # Der Name des Pakets entspricht dem Repository-Namen, klein geschrieben (so legt es docker-publish.yml an).
+      - name: Name des Pakets bestimmen
+        run: echo "IMAGE=$(echo "${GITHUB_REPOSITORY#*/}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      - name: Namenlose Versionen löschen, die älter als eine Woche sind
+        id: prune
+        uses: snok/container-retention-policy@v3.1.0
+        with:
+          account: user                 # persönliches Konto. Gehört das Repository einer Organisation: deren Namen eintragen
+          token: ${{ secrets.GITHUB_TOKEN }}
+          image-names: ${{ env.IMAGE }}
+          tag-selection: untagged
+          cut-off: 1w
+          # Zeitplan: wirklich löschen. Von Hand gestartet: so, wie es das Häkchen sagt (vorbelegt: nur anzeigen).
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+
+      - name: Zusammenfassung
+        env:
+          DELETED: ${{ steps.prune.outputs.deleted }}
+          FAILED: ${{ steps.prune.outputs.failed }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: |
+          {
+            echo "### Aufräumen der Image-Versionen"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "Testlauf: Es wurde nichts gelöscht. Was gelöscht würde, steht im Log des vorigen Schritts."
+            else
+              echo "- Gelöscht: $(printf '%s' "$DELETED" | tr ',' '\n' | grep -c . || true) Version(en)"
+              echo "- Nicht gelöscht (Fehler): $(printf '%s' "$FAILED" | tr ',' '\n' | grep -c . || true)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

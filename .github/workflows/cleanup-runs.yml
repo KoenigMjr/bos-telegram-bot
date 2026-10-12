@@ -1,0 +1,51 @@
+# Räumt alte Workflow-Läufe (die Liste unter "Actions") samt ihren Logs und Artefakten auf.
+#
+# Jeder Push erzeugt einen Lauf. Gelöscht wird ein Lauf nur, wenn ALLES zutrifft:
+#   - er ist abgeschlossen (nie ein laufender oder wartender Lauf),
+#   - er ist älter als 30 Tage,
+#   - er gehört nicht zu den neuesten 10 Läufen seines Workflows (so bleibt immer etwas Verlauf, auch bei Workflows,
+#     die selten laufen),
+#   - er ist nicht der Lauf, der gerade aufräumt.
+# Die Regeln stehen mit Tests in .github/scripts/prune_runs.py (tests/test_prune_runs.py).
+# Pro Aufruf werden höchstens 400 Läufe gelöscht (Ratenbegrenzung der GitHub-API), der Rest folgt in der nächsten Woche.
+#
+# Erster Lauf: Actions -> "Alte Workflow-Läufe aufräumen" -> Run workflow. Das Häkchen "dry_run" ist vorbelegt, es wird
+# dann nichts gelöscht, das Log zeigt nur, was gelöscht würde. Erst danach mit abgewähltem Häkchen laufen lassen.
+# Der Zeitplan löscht ohne Rückfrage.
+name: Alte Workflow-Läufe aufräumen
+
+on:
+  schedule:
+    - cron: "47 3 * * 0"        # sonntags um 03:47 UTC, nach dem Aufräumen der Image-Versionen
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Nur anzeigen, was gelöscht würde (es wird nichts gelöscht)"
+        type: boolean
+        default: true
+
+# actions: write erlaubt das Löschen von Läufen, contents: read das Auschecken des Skripts.
+permissions:
+  actions: write
+  contents: read
+
+# Nie zwei Aufräumläufe gleichzeitig.
+concurrency:
+  group: cleanup-runs
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Zeitplan: wirklich löschen. Von Hand gestartet: so, wie es das Häkchen sagt (vorbelegt: nur anzeigen).
+      - name: Alte Läufe aufräumen
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --keep-days 30 --keep-per-workflow 10 --max-deletions 400)
+          if [ "$DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          python3 .github/scripts/prune_runs.py "${args[@]}"

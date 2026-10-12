@@ -782,3 +782,43 @@ Einmalig nach dem ersten erfolgreichen Lauf: Auf GitHub unter *Packages →
 bos-telegram-bot → Package settings* die Sichtbarkeit auf **Public** stellen,
 sonst können andere das Image nicht ohne Login ziehen.
 
+### Alte Image-Versionen aufräumen
+
+Jeder Push auf `main` setzt `latest` auf das neue Image, die vorige Version bleibt als namenlose Version zurück,
+dazu kommen bei zwei Architekturen mehrere Teilbausteine pro Build. Der Workflow
+[`.github/workflows/cleanup-images.yml`](.github/workflows/cleanup-images.yml) räumt das **sonntags** auf:
+
+- Gelöscht werden nur **namenlose** Versionen, die **älter als eine Woche** sind.
+- Nie gelöscht werden Versionen mit Tag (`latest` und alle Release-Tags wie `1.2.3`) und die Teilbausteine, die zu
+  einer Version mit Tag gehören. Das erkennt die Action selbst und bricht im Zweifel ab, statt ein Image zu
+  beschädigen.
+- Eine versehentlich gelöschte Version lässt sich 30 Tage lang wiederherstellen (*Package settings*).
+
+Einmalige Einrichtung: Unter *Packages → bos-telegram-bot → Package settings → Manage Actions access* das
+Repository hinzufügen und ihm die Rolle **Admin** geben. Ohne das darf das eingebaute Token nicht löschen, der Lauf
+scheitert dann mit einer Fehlermeldung, es wird nichts beschädigt.
+
+Erster Lauf von Hand: *Actions → Alte Image-Versionen aufräumen → Run workflow*. Das Häkchen `dry_run` ist
+vorbelegt, dann wird **nichts gelöscht**, das Log zeigt nur, was gelöscht würde. Erst wenn das plausibel aussieht, noch
+einmal mit abgewähltem Häkchen starten. Der Zeitplan löscht ohne Rückfrage.
+
+### Alte Workflow-Läufe aufräumen
+
+Jeder Push erzeugt einen Lauf unter *Actions*, samt Log und Artefakten. Der Workflow
+[`.github/workflows/cleanup-runs.yml`](.github/workflows/cleanup-runs.yml) räumt das **sonntags** auf, nach dem
+Aufräumen der Image-Versionen. Gelöscht wird ein Lauf nur, wenn **alles** zutrifft:
+
+- Er ist **abgeschlossen**. Ein laufender oder wartender Lauf wird nie angefasst.
+- Er ist **älter als 30 Tage**.
+- Er gehört **nicht zu den neuesten 10 Läufen** seines Workflows. So bleibt bei selten laufenden Workflows immer
+  etwas Verlauf, und ein Workflow, der lange nicht lief, verliert nicht seine ganze Geschichte.
+- Er ist nicht der Lauf, der gerade aufräumt.
+
+Pro Aufruf werden höchstens 400 Läufe gelöscht (Ratenbegrenzung der GitHub-API), der Rest folgt in der nächsten Woche.
+Eine Einrichtung in den Einstellungen ist nicht nötig, der Workflow bringt das Recht zum Löschen selbst mit. Die Regeln
+stehen in [`.github/scripts/prune_runs.py`](.github/scripts/prune_runs.py) und sind mit Tests abgesichert
+(`tests/test_prune_runs.py`). Die Werte (30 Tage, 10 Läufe, 400 pro Aufruf) stehen im Workflow und lassen sich dort ändern.
+
+Erster Lauf von Hand: *Actions → Alte Workflow-Läufe aufräumen → Run workflow*. Das Häkchen `dry_run` ist vorbelegt,
+dann wird **nichts gelöscht**, das Log listet jeden Lauf auf, der gelöscht würde. Der Zeitplan löscht ohne Rückfrage.
+Ein gelöschter Lauf lässt sich **nicht** wiederherstellen.
