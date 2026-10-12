@@ -521,7 +521,8 @@ einer klaren Meldung ab.
 1. Die Person schreibt dem Bot `/start`. Sie bekommt ihre Telegram-ID genannt
    und die Info, dass eine Anfrage an die Admins ging.
 2. Jeder Admin erhält eine Nachricht mit **Freischalten / Ablehnen**.
-3. Nach der Freigabe wird die Person benachrichtigt und kann den Bot nutzen.
+3. Nach der Freigabe bekommt die Person die Meldung `✅ Du wurdest freigeschaltet. Schreibe /start für eine
+   Übersicht.` und kann den Bot nutzen.
 
 Es ist weder ein Neustart noch ein neues Deployment nötig. Die Freigaben liegen
 in `bot_db.sqlite3` im Datenordner und überleben Neustarts.
@@ -533,6 +534,15 @@ in `bot_db.sqlite3` im Datenordner und überleben Neustarts.
 
 Hinweise:
 
+- **Die Meldung nach der Freigabe** geht zuerst privat an die Person. Telegram erlaubt einem Bot aber nicht, jemanden
+  privat anzuschreiben, der ihm nie privat geschrieben hat. Das ist typisch, wenn die Anfrage aus einer **Gruppe**
+  kam, oder bei `/adduser` für jemanden, der den Bot noch nie angeschrieben hat. Der Bot merkt sich deshalb, aus
+  welchem Chat die Anfrage kam, und schreibt die Meldung notfalls dorthin, mit Erwähnung der Person. Der Admin
+  sieht in seiner Bestätigung, wie es ausging:
+  - `✅ Freigeschaltet: 123` heißt, die Person wurde privat benachrichtigt.
+  - Ein Zusatz `ℹ️ Privat war er nicht erreichbar …` heißt, die Meldung ging in den Chat der Anfrage.
+  - Ein Zusatz `⚠️ Der User konnte nicht benachrichtigt werden …` heißt, es gab keinen Weg. Die Person ist trotzdem
+    freigeschaltet, aber du musst ihr Bescheid geben. Sie muss dem Bot einmal privat `/start` schreiben.
 - **Abgelehnte** Personen werden danach still ignoriert (keine weiteren
   Anfragen an die Admins). Ein späteres `/adduser` hebt das auf.
 - **Entzug** über `/users` löscht auch die privaten Abos der Person, damit sie

@@ -7,6 +7,7 @@ from functools import wraps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from bos_telegram_bot.chat.common import get_db_path
 from bos_telegram_bot.storage import database as db
 
 log = logging.getLogger(__name__)
@@ -25,6 +26,39 @@ async def try_send(context, chat_id: int, text: str, **kwargs) -> bool:
     except Exception as e:
         log.warning("Nachricht an %s nicht zustellbar (%s: %s)", chat_id, type(e).__name__, e)
         return False
+
+
+APPROVED_TEXT = "✅ Du wurdest freigeschaltet. Schreibe /start für eine Übersicht."
+
+
+async def notify_approved(context, user_id: int) -> str:
+    """Teilt einem freigeschalteten User mit, dass er nun Zugriff hat.
+
+    Zuerst privat. Telegram erlaubt einem Bot aber nicht, jemanden privat anzuschreiben, der ihm nie privat
+    geschrieben hat (typisch, wenn die Anfrage aus einer Gruppe kam). Dann geht die Meldung in den Chat, aus dem
+    die Anfrage kam, mit Erwähnung des Users. Liefert 'private', 'chat' oder 'none'."""
+    if await try_send(context, user_id, APPROVED_TEXT):
+        return "private"
+    user = db.get_user(get_db_path(context), user_id)
+    chat_id = user["request_chat_id"] if user else None
+    if chat_id is not None and chat_id != user_id:
+        name = html.escape((user["name"] or "").strip() or str(user_id))
+        mention = f'<a href="tg://user?id={user_id}">{name}</a>'
+        if await try_send(context, chat_id, f"✅ {mention} wurde freigeschaltet. Schreibe /start für eine Übersicht.",
+                          parse_mode="HTML"):
+            log.info("Freigabe-Meldung für %s ging in den Chat %s, privat war sie nicht zustellbar", user_id, chat_id)
+            return "chat"
+    return "none"
+
+
+def approval_note(delivery: str) -> str:
+    """Zusatzzeile für den Admin, wenn die Meldung an den freigeschalteten User nicht privat ankam."""
+    if delivery == "chat":
+        return "\nℹ️ Privat war er nicht erreichbar, die Meldung ging in den Chat seiner Anfrage."
+    if delivery == "none":
+        return ("\n⚠️ Der User konnte nicht benachrichtigt werden (er hat dem Bot noch nie privat geschrieben). "
+                "Bitte gib ihm Bescheid, er muss dem Bot einmal privat /start schreiben.")
+    return ""
 
 
 async def _notify_admins_of_request(context, user, chat) -> None:
@@ -84,7 +118,7 @@ def restricted(func):
                 "⏳ Deine Zugriffsanfrage wurde bereits gesendet und wartet auf Freigabe."
             )
 
-        db.set_user_status(db_path, user.id, "pending", user.full_name)
+        db.set_user_status(db_path, user.id, "pending", user.full_name, update.effective_chat.id)
         log.info("Zugriffsanfrage von %s (Chat %s)", user.id, update.effective_chat.id)
         await update.message.reply_text(
             f"⛔ Keine Berechtigung. Deine Telegram-ID: {user.id}\n"

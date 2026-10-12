@@ -5,7 +5,7 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from bos_telegram_bot.chat.access import is_admin, restricted, try_send
+from bos_telegram_bot.chat.access import approval_note, is_admin, notify_approved, restricted
 from bos_telegram_bot.chat.common import entry_by_for, get_db_path
 from bos_telegram_bot.chat.fields import create_name_pattern, send_page, subscribe_row
 from bos_telegram_bot.storage import database as db
@@ -39,8 +39,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if action == "ok":
                 db.set_user_status(admin_db_path, uid, "allowed")
                 log.info("Admin %s hat %s freigeschaltet", query.from_user.id, uid)
-                await query.edit_message_text(f"✅ Freigeschaltet: {uid}")
-                await try_send(context, uid, "✅ Du wurdest freigeschaltet. Schreibe /start für eine Übersicht.")
+                delivery = await notify_approved(context, uid)
+                await query.edit_message_text(f"✅ Freigeschaltet: {uid}" + approval_note(delivery))
             else:
                 db.set_user_status(admin_db_path, uid, "denied")
                 log.info("Admin %s hat die Anfrage von %s abgelehnt", query.from_user.id, uid)

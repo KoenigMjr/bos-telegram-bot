@@ -35,10 +35,15 @@ def init_db(db_path: str) -> None:
             user_id INTEGER PRIMARY KEY,
             status TEXT NOT NULL,      -- 'allowed' | 'pending' | 'denied'
             name TEXT,
+            request_chat_id INTEGER,   -- Chat, aus dem die Zugriffsanfrage kam (für die Freigabe-Meldung)
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    # Datenbanken aus früheren Versionen haben die Spalte noch nicht: nachrüsten (bestehende Daten bleiben).
+    columns = {row["name"] for row in c.execute("PRAGMA table_info(users)").fetchall()}
+    if "request_chat_id" not in columns:
+        c.execute("ALTER TABLE users ADD COLUMN request_chat_id INTEGER")
     # Aus Alarmen gelernte Zuordnungen (z.B. RIC -> Beschreibung), siehe knowledge.py.
     c.execute(
         """
@@ -105,20 +110,31 @@ def get_user_status(db_path: str, user_id: int):
     return row["status"] if row else None
 
 
-def set_user_status(db_path: str, user_id: int, status: str, name: str = None) -> None:
+def set_user_status(db_path: str, user_id: int, status: str, name: str = None, request_chat_id: int = None) -> None:
+    """request_chat_id: der Chat, aus dem die Anfrage kam. Ein späteres Ändern des Status ohne Angabe lässt ihn
+    unverändert."""
     conn = get_connection(db_path)
     conn.execute(
         """
-        INSERT INTO users (user_id, status, name) VALUES (?, ?, ?)
+        INSERT INTO users (user_id, status, name, request_chat_id) VALUES (?, ?, ?, ?)
         ON CONFLICT(user_id) DO UPDATE SET
             status = excluded.status,
             name = COALESCE(excluded.name, users.name),
+            request_chat_id = COALESCE(excluded.request_chat_id, users.request_chat_id),
             updated_at = CURRENT_TIMESTAMP
         """,
-        (user_id, status, name),
+        (user_id, status, name, request_chat_id),
     )
     conn.commit()
     conn.close()
+
+
+def get_user(db_path: str, user_id: int):
+    """Die ganze Zeile eines Users (status, name, request_chat_id) oder None."""
+    conn = get_connection(db_path)
+    row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    return row
 
 
 def list_users(db_path: str, status: str):
