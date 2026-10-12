@@ -35,11 +35,23 @@ def normalize_level(value):
     return name if name in LEVELS else None
 
 
+class QuietPolling(logging.Filter):
+    """Blendet die erfolgreiche Abfrage neuer Nachrichten aus (getUpdates, etwa alle 10 Sekunden): Sie ist im Log nur
+    Rauschen. Alles andere von httpx bleibt, z.B. jedes sendMessage mit seiner Dauer. Auch eine fehlgeschlagene
+    Abfrage (anderer Status als 200) bleibt sichtbar, sie deutet auf ein Problem hin."""
+
+    def filter(self, record):
+        if record.name != "httpx":
+            return True
+        message = record.getMessage()
+        return not ("/getUpdates" in message and '"HTTP/1.1 200 OK"' in message)
+
+
 class RedactingFormatter(logging.Formatter):
     """Kurzes Zeitformat mit Zeitzonenversatz und geschwärzten Geheimnissen."""
 
     def __init__(self, secrets=()):
-        super().__init__("%(asctime)s %(levelname)-7s %(short_name)s: %(message)s", "%Y-%m-%d %H:%M:%S%z")
+        super().__init__("%(asctime)s %(shown_level)-7s %(short_name)s: %(message)s", "%Y-%m-%d %H:%M:%S%z")
         self.secrets = [s for s in secrets if s]
 
     def formatMessage(self, record):
@@ -49,6 +61,10 @@ class RedactingFormatter(logging.Formatter):
     def format(self, record):
         prefix = PACKAGE + "."
         record.short_name = record.name[len(prefix):] if record.name.startswith(prefix) else record.name
+        # Die Bibliotheken (httpx, telegram) sagen bei ihren Meldungen INFO. Die sind aber nur im DEBUG-Modus
+        # sichtbar, deshalb steht dort auch DEBUG. Die Meldung selbst bleibt unverändert.
+        from_library = not (record.name == PACKAGE or record.name.startswith(prefix))
+        record.shown_level = "DEBUG" if (record.levelno == logging.INFO and from_library) else record.levelname
         return self.redact(super().format(record))   # auch der Traceback läuft hier durch
 
     def redact(self, text):
@@ -73,6 +89,7 @@ def setup_logging(level="INFO", secrets=()):
     reset_logging()
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(RedactingFormatter(secrets))
+    handler.addFilter(QuietPolling())
     setattr(handler, _MARKER, True)
     logging.getLogger().addHandler(handler)
     set_level(level)

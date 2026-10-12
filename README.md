@@ -622,7 +622,9 @@ Die Alarmzeile nennt nur RIC und Name.
 - warum etwas ignoriert wurde (kein JSON, leere Nachricht)
 - welches Abo auf welchen Wert gepasst hat
 - die fertige Nachricht pro Chat und wie lange Telegram zum Annehmen gebraucht hat
-- jede Anfrage des Bots an Telegram, auch das regelmäßige Abfragen neuer Nachrichten (deshalb viele Zeilen)
+- jede Anfrage des Bots an Telegram, z.B. jedes `sendMessage` (daran sieht man, wie lange Telegram braucht). Die
+  regelmäßige Abfrage neuer Nachrichten (`getUpdates`, etwa alle 10 Sekunden) steht nicht im Log, solange sie klappt.
+  Schlägt sie fehl, erscheint die Zeile.
 
 DEBUG enthält die Alarmtexte. Nur zur Fehlersuche einschalten und das Log danach nicht aufbewahren.
 

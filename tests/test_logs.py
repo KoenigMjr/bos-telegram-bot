@@ -142,11 +142,11 @@ class RedactionTests(LoggingTestCase):
 
     def test_telegram_urls_are_hidden_even_without_knowing_the_token(self):
         logs.setup_logging("DEBUG")    # kein Geheimnis übergeben: das Muster allein muss reichen
-        logging.getLogger("httpx").info('HTTP Request: POST https://api.telegram.org/bot%s/getUpdates "HTTP/1.1 200 OK"', TOKEN)
+        logging.getLogger("httpx").info('HTTP Request: POST https://api.telegram.org/bot%s/sendMessage "HTTP/1.1 200 OK"', TOKEN)
         output = self.out.getvalue()
         self.assertNotIn(TOKEN, output)
         self.assertNotIn("ABCDEFghij", output)
-        self.assertIn("https://api.telegram.org/bot<TOKEN>/getUpdates", output)
+        self.assertIn("https://api.telegram.org/bot<TOKEN>/sendMessage", output)
 
     def test_tracebacks_are_hidden_too(self):
         logs.setup_logging("INFO", secrets=[TOKEN])
@@ -246,6 +246,63 @@ class SingleLineTests(LoggingTestCase):
         with self.assertLogs("bos_telegram_bot.x", level="INFO") as logged:
             logging.getLogger("bos_telegram_bot.x").info("a\nb")
         self.assertEqual(logged.records[0].getMessage(), "a\nb")
+
+
+class QuietPollingTests(LoggingTestCase):
+    REQUEST = 'HTTP Request: POST https://api.telegram.org/bot%s/%s "HTTP/1.1 %s"'
+
+    def emit(self, method, status="200 OK", logger="httpx"):
+        logging.getLogger(logger).info(self.REQUEST, TOKEN, method, status)
+
+    def test_the_successful_poll_is_not_shown(self):
+        logs.setup_logging("DEBUG")
+        self.emit("getUpdates")
+        self.assertEqual(self.lines(), [])
+
+    def test_other_requests_stay_visible_for_example_sending(self):
+        logs.setup_logging("DEBUG")
+        self.emit("sendMessage")
+        self.emit("getMe")
+        self.emit("setMyCommands")
+        self.assertEqual(len(self.lines()), 3)
+        self.assertIn("/sendMessage", self.lines()[0])
+
+    def test_a_failed_poll_stays_visible_because_it_points_to_a_problem(self):
+        logs.setup_logging("DEBUG")
+        self.emit("getUpdates", "409 Conflict")
+        self.emit("getUpdates", "502 Bad Gateway")
+        self.assertEqual(len(self.lines()), 2)
+        self.assertIn("409 Conflict", self.lines()[0])
+
+    def test_only_the_poll_from_httpx_is_filtered(self):
+        logs.setup_logging("DEBUG")
+        logging.getLogger("bos_telegram_bot.x").info('Meine Meldung enthält POST .../getUpdates "HTTP/1.1 200 OK" im Text')
+        self.assertEqual(len(self.lines()), 1)
+
+    def test_a_poll_of_the_same_chat_flood_does_not_hide_the_sends_between_them(self):
+        logs.setup_logging("DEBUG")
+        for method in ("getUpdates", "sendMessage", "getUpdates", "sendMessage", "getUpdates"):
+            self.emit(method)
+        self.assertEqual([("sendMessage" in line) for line in self.lines()], [True, True])
+
+    def test_the_token_is_still_hidden_in_the_lines_that_remain(self):
+        logs.setup_logging("DEBUG")
+        self.emit("sendMessage")
+        self.assertNotIn(TOKEN, self.out.getvalue())
+        self.assertIn("bot<TOKEN>/sendMessage", self.out.getvalue())
+
+    def test_nothing_changes_at_info_where_the_libraries_are_quiet_anyway(self):
+        logs.setup_logging("INFO")
+        self.emit("getUpdates")
+        self.emit("sendMessage")
+        self.assertEqual(self.lines(), [])
+
+    def test_the_filter_works_after_changing_the_level_later(self):
+        logs.setup_logging("INFO")
+        logs.set_level("DEBUG")
+        self.emit("getUpdates")
+        self.emit("sendMessage")
+        self.assertEqual(len(self.lines()), 1)
 
 
 if __name__ == "__main__":
