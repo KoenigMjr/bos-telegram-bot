@@ -28,7 +28,7 @@ die Alarme als JSON sendet.
    | `ADMIN_USERS`        | ja      | Deine Telegram-ID (mehrere: `123,456`)              |
    | `MQTT_HOST`          | ja      | IP/Hostname deines MQTT-Brokers                     |
    | `MQTT_PORT`          | nein    | Standard `1883`                                     |
-   | `MQTT_USERNAME`, `MQTT_PASSWORD` | nein | falls der Broker Zugangsdaten verlangt   |
+   | `MQTT_USERNAME` UND `MQTT_PASSWORD` | nein | falls der Broker Zugangsdaten verlangt   |
    | `MQTT_TOPIC`         | nein    | Standard `homeassistant/boswatch/alarm/+`           |
    | `MQTT_QOS`           | nein    | `0` (Standard) oder `1`, siehe [MQTT-Zustellung](#mqtt-zustellung-qos) |
    | `CSV_PATH_RIC`       | nein    | CSV mit RIC → Name, siehe [Namen für RIC und Fahrzeuge](#namen-für-ric-und-fahrzeuge) |
@@ -38,10 +38,7 @@ die Alarme als JSON sendet.
 
 4. **Dem Bot `/start` schreiben.** Fertig.
 
-Es wird nichts selbst gebaut: Das Image kommt fertig von GitHub
-(`ghcr.io/koenigmjr/bos-telegram-bot`), für Intel/AMD und ARM
-(Raspberry Pi, NAS). **Update:** Stack neu deployen, die Compose-Datei zieht
-dann automatisch das neueste Image. Datenbank und Benutzer liegen im
+Datenbank und Benutzer liegen im
 Datenordner auf dem Host (Standard `/opt/bos-telegram-bot/data`) und bleiben
 erhalten.
 
@@ -770,17 +767,7 @@ kein Telegram, `mqtt` und `chat` nutzen beide `core` und `storage`, kennen sich 
 neutral und darf von überall genutzt werden. Ein Test
 (`tests/test_architecture.py`) hält diese Regeln ein.
 
-## Für Maintainer: Image veröffentlichen
-
-Der Workflow [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml)
-baut das Image automatisch:
-
-- Push auf `main` → Tag `latest`
-- Git-Tag `v1.2.3` → Tags `1.2.3` und `1.2` (für Nutzer, die eine feste Version wollen)
-
-Einmalig nach dem ersten erfolgreichen Lauf: Auf GitHub unter *Packages →
-bos-telegram-bot → Package settings* die Sichtbarkeit auf **Public** stellen,
-sonst können andere das Image nicht ohne Login ziehen.
+## Für Maintainer: Aufräumen
 
 ### Alte Image-Versionen aufräumen
 
@@ -822,3 +809,14 @@ stehen in [`.github/scripts/prune_runs.py`](.github/scripts/prune_runs.py) und s
 Erster Lauf von Hand: *Actions → Alte Workflow-Läufe aufräumen → Run workflow*. Das Häkchen `dry_run` ist vorbelegt,
 dann wird **nichts gelöscht**, das Log listet jeden Lauf auf, der gelöscht würde. Der Zeitplan löscht ohne Rückfrage.
 Ein gelöschter Lauf lässt sich **nicht** wiederherstellen.
+
+## 📝 Lizenz
+
+Dieses Projekt ist Open Source. Beiträge sind willkommen!
+
+### Transparenzhinweis & KI-Unterstützung (EU-KI-Gesetz / AI Act)
+Die Inhalte, der Quellcode und die Dokumentation dieses Repositories wurden teilweise unter der Mitarbeit von künstlicher Intelligenz (KI) generiert, optimiert und debugged. 
+
+Im Einklang mit den Transparenzanforderungen des EU-KI-Gesetzes (EU AI Act) weisen wir darauf hin, dass:
+* **Menschliche Kontrolle:** Alle durch KI erzeugten oder bearbeiteten Inhalte und Codefragmente wurden von einem Menschen sorgfältig geprüft, verifiziert und getestet.
+* **Letztverantwortung:** Die finale redaktionelle und technische Verantwortung liegt vollständig beim menschlichen Betreiber dieses Repositories.
