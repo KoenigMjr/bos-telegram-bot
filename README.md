@@ -412,8 +412,11 @@ Beides zusammen ergibt bei zwei Empfängern vier Nachrichten für einen einzigen
 Zeitstempel des Alarms (`timestamp_list`, sonst `timestamp`), der in allen Kopien gleich ist, und stellt den
 Alarm **an jeden Chat nur einmal** zu.
 
-- Was Telegram angenommen hat, gilt als zugestellt. Scheitert das Senden (z.B. Zeitüberschreitung), bekommt
-  dieser Chat die **nächste Kopie** des Alarms als neuen Versuch. Chats, bei denen es klappte, nicht noch einmal.
+- Was Telegram angenommen hat, gilt als zugestellt. Solange eine Nachricht noch wartet oder gerade gesendet wird,
+  zählt sie als "in Arbeit", eine Kopie reiht sie dann nicht ein zweites Mal ein. Scheitert der Versand
+  **endgültig** (nach den Wiederholungen, siehe [Versand und Wiederholungen](#versand-und-wiederholungen)),
+  bekommt dieser Chat die **nächste Kopie** des Alarms als neuen Versuch. Chats, bei denen es klappte, nicht noch
+  einmal.
 - Kommt nur die Kopie an und das Original fehlt, wird die Kopie ganz normal zugestellt. Es geht nichts verloren.
 - Wiederholungen erscheinen nur im DEBUG-Log, ändern `/lastraw` nicht und werden nicht noch einmal gelernt.
 - Hat ein Alarm keinen Zeitstempel, wird er nie als doppelt erkannt. Lieber doppelt als verloren.
@@ -426,6 +429,51 @@ duplicates:
 ```
 
 Kommen Alarme mehr als `remember_seconds` später noch einmal an, gelten sie als neu.
+
+## Versand und Wiederholungen
+
+Der Bot stellt Alarme nicht direkt zu, sondern über eine **Warteschlange**. Der Empfang von MQTT wartet nie auf
+Telegram: Hängt ein Aufruf bei einem Chat, wird der nächste Alarm trotzdem sofort angenommen und an alle
+anderen Chats zugestellt.
+
+- **Eine Warteschlange pro Chat.** Die Reihenfolge je Chat bleibt erhalten, ein hängender Chat hält die anderen
+  nicht auf.
+- **Abstand:** Zwischen zwei Nachrichten an denselben Chat liegt mindestens 1 Sekunde (Telegram empfiehlt etwa
+  eine Nachricht pro Sekunde und Chat). Über alle Chats zusammen gehen höchstens 25 Nachrichten pro Sekunde
+  raus (Telegram erlaubt etwa 30). Bei zwei Chats merkst du davon nichts, bei hundert werden alle in rund vier
+  Sekunden bedient.
+- **Wiederholungen:** Scheitert ein Versuch (z.B. Zeitüberschreitung), wird bis zu 3-mal versucht, mit Pausen
+  von 2 und 5 Sekunden. Verlangt Telegram eine Wartezeit, hält der Bot genau sie ein.
+- **Höchstwartezeit:** Nach 120 Sekunden gibt der Bot bei einer Nachricht auf (`ERROR` im Log). Der Chat bekommt
+  den Alarm dann bei der nächsten Kopie noch einmal, solange das [Gedächtnis](#doppelte-alarme) ihn kennt.
+- **Dauerhafte Fehler werden nicht wiederholt**, etwa wenn der Bot aus einer Gruppe entfernt wurde
+  (`Forbidden`) oder Telegram die Nachricht ablehnt. Das Abo bleibt dann bestehen und lässt sich mit `/abo`
+  entfernen. Wurde eine Gruppe zur Supergruppe, nennt das Log die neue Chat-ID.
+- **Begrenzt:** Es warten höchstens 500 Nachrichten gleichzeitig. Ist die Schlange voll, fällt die älteste
+  wartende heraus (`ERROR`).
+- **Zeitüberschreitung für Telegram:** 15 statt 5 Sekunden. Telegram antwortet manchmal langsam, und bei 5
+  Sekunden hat der Bot zu früh aufgegeben.
+- **Beim Beenden** (z.B. bei einem Update) stellt der Bot noch bis zu 10 Sekunden lang zu, was in der Schlange
+  steht. Deshalb steht im `docker-compose.yml` `stop_grace_period: 20s`. Wer eine eigene Compose-Datei benutzt,
+  sollte das übernehmen, Docker beendet den Container sonst schon nach 10 Sekunden hart.
+
+Alles lässt sich in `data/config.yaml` ändern, hier mit den Standardwerten:
+
+```yaml
+sending:
+  min_interval_seconds: 1       # Abstand zwischen zwei Nachrichten an denselben Chat
+  max_per_second: 25            # Obergrenze über alle Chats zusammen
+  attempts: 3                   # Versuche je Nachricht (1 = nicht wiederholen)
+  retry_pause_seconds: [2, 5]   # Pause vor dem 2. und 3. Versuch, die letzte gilt für weitere
+  max_wait_seconds: 120         # so lange wird eine Nachricht höchstens wiederholt
+  timeout_seconds: 15           # Zeitüberschreitung einer Anfrage an Telegram
+```
+
+Zwei Einschränkungen: Ein `TimedOut` heißt nur, dass Telegram nicht rechtzeitig geantwortet hat, die Nachricht
+kann trotzdem angekommen sein. Eine Wiederholung kann sie dann ein zweites Mal zustellen. Bei Alarmen ist das
+Absicht, doppelt ist besser als verloren. Und: Telegram erlaubt in einer Gruppe nur etwa 20 Nachrichten pro
+Minute. Bei einem Dauerfeuer an dieselbe Gruppe antwortet es mit einer Wartezeit, die der Bot einhält, die
+Nachrichten kommen dann verzögert.
 
 ## MQTT-Zustellung (QoS)
 
@@ -530,18 +578,23 @@ Der Bot schreibt auf die Standardausgabe. In Portainer: Container → **Logs**, 
 
 ```
 2026-10-09 08:56:54+0200 INFO    mqtt.listener: Verbunden mit MQTT-Broker 192.168.1.100:1883, lausche auf Topic homeassistant/boswatch/alarm/+ (QoS 0)
-2026-10-09 08:57:28+0200 INFO    mqtt.dispatch: Alarm 1234567 (Wache Nord): 2 Abo(s) in 1 Chat(s), gesendet 1/1
+2026-10-09 08:57:28+0200 INFO    mqtt.dispatch: Alarm 1234567 (Wache Nord): 2 Abo(s) in 1 Chat(s), gesendet 1/1 in 0.3 s
 2026-10-09 08:58:03+0200 INFO    mqtt.dispatch: Alarm 1234599 (Wache Süd): kein passendes Abo
-2026-10-09 08:58:40+0200 WARNING mqtt.dispatch: Senden an Chat -1001234567890 fehlgeschlagen (TimedOut: Timed out)
-2026-10-09 08:58:40+0200 WARNING mqtt.dispatch: Alarm 1234567 (Wache Nord): 1 Abo(s) in 1 Chat(s), gesendet 0/1
+2026-10-09 08:58:40+0200 WARNING chat.sender: Senden an Chat -1001234567890 fehlgeschlagen (TimedOut: Timed out), Versuch 1/3, neuer Versuch in 2 s
+2026-10-09 08:58:57+0200 INFO    mqtt.dispatch: Alarm 1234567 (Wache Nord): 1 Abo(s) in 1 Chat(s), gesendet 1/1 in 17.4 s
+2026-10-09 09:03:10+0200 ERROR   chat.sender: Senden an Chat -1001234567890 aufgegeben nach 3 Versuchen (TimedOut: Timed out)
+2026-10-09 09:03:10+0200 WARNING mqtt.dispatch: Alarm 1234567 (Wache Nord): 1 Abo(s) in 1 Chat(s), gesendet 0/1 in 52.6 s
 2026-10-09 08:59:12+0200 INFO    chat.fields: Abo gesetzt: Chat 123456789, Feld ric, Wert '1234567'
 ```
 
-So liest man die Alarmzeile: `2 Abo(s) in 1 Chat(s), gesendet 1/1` heißt, zwei Abos passen, beide gehören zu
-einem Chat, und Telegram hat die eine Nachricht angenommen. Pro Chat geht immer genau eine Nachricht
-raus. Steht dort `gesendet 0/1`, kam die Nachricht nicht durch, der Grund steht in der Zeile davor.
-`TimedOut` heißt, dass Telegram nicht rechtzeitig geantwortet hat. Die Nachricht kann trotzdem angekommen
-sein.
+So liest man die Alarmzeile: `2 Abo(s) in 1 Chat(s), gesendet 1/1 in 0.3 s` heißt, zwei Abos passen, beide
+gehören zu einem Chat, und Telegram hat die eine Nachricht angenommen. Pro Chat geht immer genau eine
+Nachricht raus. Die Zeit am Ende ist die **Dauer vom Eintreffen des Alarms bis zum Ergebnis beim letzten Chat**,
+also das, was dich im Einsatz interessiert. Die Zeile erscheint erst, wenn alle Chats ein Ergebnis haben.
+Dazwischen steht, was beim Versand passiert: Eine `WARNING` mit `Versuch 1/3` heißt, dass ein Versuch scheiterte
+und gleich wiederholt wird. Steht dort `gesendet 0/1`, kam die Nachricht nicht durch, der Grund steht in der
+`ERROR`-Zeile davor. `TimedOut` heißt, dass Telegram nicht rechtzeitig geantwortet hat, die Nachricht kann
+trotzdem angekommen sein. Mehr dazu unter [Versand und Wiederholungen](#versand-und-wiederholungen).
 
 Außerdem steht im INFO-Log, wer wann Abos angelegt oder entfernt hat und wer von einem Admin freigeschaltet,
 abgelehnt oder gesperrt wurde (jeweils mit Telegram-ID, ohne Namen).
@@ -678,7 +731,8 @@ bos_telegram_bot/
   logs.py                  Logging: Format, Pegel, Schwärzen des Tokens
   core/                    reine Logik, ohne Telegram und ohne Datenbank
     matching.py              Muster, Platzhalter, "Zahl+", Abgleich mit Multicast-Listen
-    delivery.py              erkennt doppelte Alarme, merkt sich die schon belieferten Chats
+    delivery.py              erkennt doppelte Alarme, merkt sich die belieferten Chats und die in Arbeit
+    sending.py               Standardwerte und Prüfung der Einstellungen für den Versand
     template.py              Aufbau der Alarm-Nachricht
   storage/
     database.py              SQLite: Abos, Benutzer, gelernte Namen
@@ -687,6 +741,7 @@ bos_telegram_bot/
     listener.py              Verbindung zum Broker, nimmt Alarme entgegen
     dispatch.py              gleicht ab, baut die Nachricht, sendet sie
   chat/                    Telegram-Seite
+    sender.py                Versandschlange: Abstand, Wiederholungen, Obergrenzen
     access.py                Admins, Freigabe, Zugriffsanfragen
     fields.py                /ric, /message ... und die Namenssuche /description
     prompts.py               Rückfrage-Dialog

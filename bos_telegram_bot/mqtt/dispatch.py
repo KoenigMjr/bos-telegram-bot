@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import time
 
 from bos_telegram_bot.core.delivery import alarm_key
 from bos_telegram_bot.core.matching import candidate_values, match_sub, split_list
@@ -70,28 +69,49 @@ def build_notification_text(payload: dict, template: str, matched_aliases: list)
     return render(template, payload, matched_aliases)
 
 
-async def _notify_subscriber(app, chat_id: int, text: str) -> bool:
-    """Sendet die Nachricht an einen Chat. True, wenn Telegram sie angenommen hat."""
-    started = time.monotonic()
-    try:
-        await app.bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
-    except Exception as e:
-        # Häufigste Ursache in Gruppen: Bot wurde entfernt/geblockt, oder
-        # 'Forbidden: bot was kicked from the group chat'. Abo bleibt dann
-        # bestehen, bis jemand es manuell per /abo löscht (bewusst kein
-        # Auto-Cleanup, um keine Abos ohne Nachfrage zu verlieren).
-        log.warning("Senden an Chat %s fehlgeschlagen (%s: %s)", chat_id, type(e).__name__, e)
-        return False
-    log.debug("Chat %s: gesendet in %.2f s", chat_id, time.monotonic() - started)
-    return True
+class _AlarmDelivery:
+    """Sammelt die Ergebnisse der Nachrichten eines Alarms und schreibt am Ende die Zusammenfassung.
+
+    Die Nachrichten gehen in die Versandschlange und sind erst später fertig. Jede meldet ihr Ergebnis hierher:
+    Was Telegram angenommen hat, gilt im Gedächtnis als zugestellt. Scheitert der Versand endgültig, wird die
+    Reservierung freigegeben, und die nächste Kopie des Alarms darf es noch einmal versuchen."""
+
+    def __init__(self, label, key, delivered, sender, total, matched_subs, is_new):
+        self.label, self.key, self.delivered, self.sender = label, key, delivered, sender
+        self.total, self.matched_subs, self.is_new = total, matched_subs, is_new
+        self.started = sender.now()
+        self.done = 0
+        self.sent = 0
+
+    def on_result(self, chat_id, accepted, reason) -> None:
+        if self.delivered is not None:
+            if accepted:
+                self.delivered.mark_delivered(self.key, chat_id)       # nur was Telegram angenommen hat, gilt als zugestellt
+            else:
+                self.delivered.release(self.key, chat_id)
+        self.done += 1
+        self.sent += 1 if accepted else 0
+        if self.done == self.total:
+            self._log_summary()
+
+    def _log_summary(self) -> None:
+        elapsed = self.sender.now() - self.started
+        level = logging.INFO if self.sent == self.total else logging.WARNING
+        if self.is_new:
+            log.log(level, "Alarm %s: %d Abo(s) in %d Chat(s), gesendet %d/%d in %.1f s",
+                    self.label, self.matched_subs, self.total, self.sent, self.total, elapsed)
+        else:
+            log.log(level, "Alarm %s: Wiederholung, %d Chat(s) noch offen, gesendet %d/%d in %.1f s",
+                    self.label, self.total, self.sent, self.total, elapsed)
 
 
-async def handle_payload(app, db_path: str, active_fields: set, template: str, payload: dict, delivered=None) -> None:
+async def handle_payload(db_path: str, active_fields: set, template: str, payload: dict, sender, delivered=None) -> None:
     """Verteilt einen Alarm an alle Chats, deren Abos passen.
 
-    delivered ist das Gedächtnis für doppelte Alarme (core/delivery.py). Ohne es wird jede Nachricht
-    behandelt, als wäre sie neu. Mit ihm geht ein Alarm an jeden Chat höchstens einmal raus, auch wenn
-    er mehrfach eintrifft; nur Chats, bei denen das Senden scheiterte, werden beim nächsten Mal erneut
+    Die Nachrichten werden nur in die Versandschlange (sender) gestellt, der Empfang wartet nie auf Telegram.
+    delivered ist das Gedächtnis für doppelte Alarme (core/delivery.py). Ohne es wird jede Nachricht behandelt,
+    als wäre sie neu. Mit ihm geht ein Alarm an jeden Chat höchstens einmal raus, auch wenn er mehrfach
+    eintrifft; nur Chats, bei denen das Senden endgültig scheiterte, werden bei der nächsten Kopie erneut
     versucht."""
     label = describe_alarm(payload)
     key = alarm_key(payload) if delivered is not None else None
@@ -134,33 +154,27 @@ async def handle_payload(app, db_path: str, active_fields: set, template: str, p
             log.debug("Alarm %s: Wiederholung, weiterhin kein passendes Abo", label)
         return
 
-    # Chats, an die dieser Alarm schon ging (Kopie des Alarms, zweites Multicast-Topic), werden übersprungen.
+    # Chats, an die dieser Alarm schon ging oder gerade geht (Kopie des Alarms, zweites Multicast-Topic), werden
+    # übersprungen. claim() reserviert den Chat gleich, damit eine Kopie ihn nicht ein zweites Mal einreiht.
     pending = {}
     for chat_id, aliases in matches.items():
-        if delivered is not None and delivered.is_delivered(key, chat_id):
-            log.debug("Chat %s: Alarm schon zugestellt, übersprungen", chat_id)
+        if delivered is not None and not delivered.claim(key, chat_id):
+            log.debug("Chat %s: Alarm schon zugestellt oder in Arbeit, übersprungen", chat_id)
         else:
             pending[chat_id] = aliases
     if not pending:
-        log.debug("Alarm %s: Wiederholung, alle %d Chat(s) schon beliefert", label, len(matches))
+        log.debug("Alarm %s: Wiederholung, alle %d Chat(s) schon beliefert oder in Arbeit", label, len(matches))
         return
 
     texts = {chat_id: build_notification_text(payload, template, aliases) for chat_id, aliases in pending.items()}
+    delivery = _AlarmDelivery(label, key, delivered, sender, len(texts), matched_subs, is_new)
     for chat_id, text in texts.items():
         log.debug("Nachricht an Chat %s: %s", chat_id, text)
-
-    chats = list(texts)
-    results = await asyncio.gather(*(_notify_subscriber(app, chat_id, texts[chat_id]) for chat_id in chats))
-    for chat_id, accepted in zip(chats, results):
-        if accepted and delivered is not None:
-            delivered.mark_delivered(key, chat_id)       # nur was Telegram angenommen hat, gilt als zugestellt
-
-    sent = sum(results)
-    level = logging.INFO if sent == len(chats) else logging.WARNING
-    if is_new:
-        log.log(level, "Alarm %s: %d Abo(s) in %d Chat(s), gesendet %d/%d", label, matched_subs, len(chats), sent, len(chats))
-    else:
-        log.log(level, "Alarm %s: Wiederholung, %d Chat(s) noch offen, gesendet %d/%d", label, len(chats), sent, len(chats))
+        try:
+            sender.submit(chat_id, text, delivery.on_result)
+        except Exception as error:                     # darf die übrigen Chats nicht um ihren Alarm bringen
+            log.exception("Alarm %s: Einreihen für Chat %s fehlgeschlagen", label, chat_id)
+            delivery.on_result(chat_id, False, str(error))
 
 
 async def learn_payload(db_path: str, entries: list, payload: dict) -> None:

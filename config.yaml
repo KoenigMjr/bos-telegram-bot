@@ -92,6 +92,16 @@ fields:
 logging:
   level: INFO
 
+# Versand der Alarme an Telegram. Der Empfang von MQTT wartet nie auf Telegram: Jede Nachricht kommt in eine
+# Warteschlange, pro Chat eine eigene. Ein Chat, bei dem Telegram hängt, hält die anderen nicht auf.
+sending:
+  min_interval_seconds: 1       # Mindestabstand zwischen zwei Nachrichten an denselben Chat (Telegram: ca. 1/s)
+  max_per_second: 25            # Obergrenze über alle Chats zusammen (Telegram erlaubt etwa 30)
+  attempts: 3                   # Versuche je Nachricht (1 = nicht wiederholen)
+  retry_pause_seconds: [2, 5]   # Pause vor dem 2. und 3. Versuch, die letzte gilt für alle weiteren
+  max_wait_seconds: 120         # so lange wird eine Nachricht höchstens wiederholt, danach gibt der Bot auf
+  timeout_seconds: 15           # Zeitüberschreitung einer Anfrage an Telegram (Standard der Bibliothek: 5)
+
 # Derselbe Alarm kann mehrfach beim Bot ankommen: Eine Automation (z.B. in Home Assistant) kann ihn kurz nach
 # dem Original noch einmal veröffentlichen, und ein Multicast mit mehreren Empfängern kommt einmal je
 # Empfänger-Topic an. Der Bot erkennt das am Zeitstempel des Alarms, merkt sich für diese Zeit, an welche

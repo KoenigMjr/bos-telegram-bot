@@ -30,6 +30,7 @@ async def start_mqtt_listener(app):
     active_fields = app.bot_data["active_fields"]
     template = app.bot_data["notification_template"]
     delivered = app.bot_data.get("delivered")      # Gedächtnis für doppelte Alarme, None = abgeschaltet
+    sender = app.bot_data["sender"]                # die Versandschlange (chat/sender.py), stellt Nachrichten zu
 
     while True:
         try:
@@ -69,7 +70,7 @@ async def start_mqtt_listener(app):
                         app.bot_data["last_payload"] = payload
 
                     try:
-                        await handle_payload(app, db_path, active_fields, template, payload, delivered)
+                        await handle_payload(db_path, active_fields, template, payload, sender, delivered)
                         if is_new:
                             await learn_payload(db_path, entries, payload)
                     except Exception:

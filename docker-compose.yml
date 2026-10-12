@@ -8,6 +8,9 @@ services:
     pull_policy: always   # Update = Stack neu deployen, zieht automatisch das neue Image
     container_name: bos-telegram-bot
     restart: unless-stopped
+    # Beim Beenden stellt der Bot noch bis zu 10 Sekunden lang zu, was in der Versandschlange steht.
+    # Docker beendet sonst schon nach 10 Sekunden hart.
+    stop_grace_period: 20s
     volumes:
       # Datenordner auf dem Host: Datenbank (Abos, Benutzer, gelernte Namen) sowie
       # optional eine eigene config.yaml und eine CSV (descriptions_ric.csv).

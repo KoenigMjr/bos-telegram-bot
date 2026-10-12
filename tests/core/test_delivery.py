@@ -134,5 +134,84 @@ class DeliveredTests(unittest.TestCase):
         self.assertTrue(self.memory.is_delivered("a", -1001234567890))
 
 
+class ClaimTests(unittest.TestCase):
+    """Der Zustand 'in Arbeit': verhindert, dass eine Kopie eine Nachricht einreiht, die schon wartet."""
+
+    def setUp(self):
+        self.clock = Clock()
+        self.memory = DeliveryMemory(ttl_seconds=300, clock=self.clock)
+        self.memory.register("a")
+
+    def test_the_first_claim_wins_and_the_second_is_refused(self):
+        self.assertTrue(self.memory.claim("a", 11))
+        self.assertFalse(self.memory.claim("a", 11))
+        self.assertFalse(self.memory.claim("a", 11))
+
+    def test_claims_are_per_chat_and_per_alarm(self):
+        self.memory.register("b")
+        self.assertTrue(self.memory.claim("a", 11))
+        self.assertTrue(self.memory.claim("a", 22))
+        self.assertTrue(self.memory.claim("b", 11))
+
+    def test_a_claimed_chat_is_pending_but_not_yet_delivered(self):
+        self.memory.claim("a", 11)
+        self.assertTrue(self.memory.is_pending("a", 11))
+        self.assertFalse(self.memory.is_delivered("a", 11))
+
+    def test_delivering_turns_pending_into_delivered(self):
+        self.memory.claim("a", 11)
+        self.memory.mark_delivered("a", 11)
+        self.assertFalse(self.memory.is_pending("a", 11))
+        self.assertTrue(self.memory.is_delivered("a", 11))
+        self.assertFalse(self.memory.claim("a", 11))               # und bleibt gesperrt
+
+    def test_releasing_after_a_failure_allows_the_next_copy_to_try_again(self):
+        self.assertTrue(self.memory.claim("a", 11))
+        self.memory.release("a", 11)
+        self.assertFalse(self.memory.is_pending("a", 11))
+        self.assertFalse(self.memory.is_delivered("a", 11))
+        self.assertTrue(self.memory.claim("a", 11))
+
+    def test_releasing_does_not_undo_a_delivery(self):
+        self.memory.claim("a", 11)
+        self.memory.mark_delivered("a", 11)
+        self.memory.release("a", 11)
+        self.assertTrue(self.memory.is_delivered("a", 11))
+
+    def test_marking_delivered_without_a_claim_still_works(self):
+        self.memory.mark_delivered("a", 11)                          # wie bisher
+        self.assertTrue(self.memory.is_delivered("a", 11))
+        self.assertFalse(self.memory.claim("a", 11))
+
+    def test_without_a_key_nothing_is_tracked_and_every_claim_succeeds(self):
+        self.assertTrue(self.memory.claim(None, 11))
+        self.assertTrue(self.memory.claim(None, 11))
+        self.assertFalse(self.memory.is_pending(None, 11))
+        self.memory.release(None, 11)
+        self.memory.mark_delivered(None, 11)
+
+    def test_an_unregistered_alarm_is_not_tracked(self):
+        self.assertTrue(self.memory.claim("unbekannt", 11))
+        self.assertTrue(self.memory.claim("unbekannt", 11))
+
+    def test_a_claim_expires_with_the_alarm(self):
+        self.memory.claim("a", 11)
+        self.clock.advance(300)
+        self.assertFalse(self.memory.is_pending("a", 11))
+        self.memory.register("a")
+        self.assertTrue(self.memory.claim("a", 11))
+
+    def test_a_late_result_for_an_expired_alarm_is_ignored(self):
+        self.memory.claim("a", 11)
+        self.clock.advance(300)
+        self.memory.mark_delivered("a", 11)                          # kein Fehler
+        self.memory.release("a", 11)
+        self.assertFalse(self.memory.knows("a"))
+
+    def test_group_chats_with_negative_ids(self):
+        self.assertTrue(self.memory.claim("a", -1001234567890))
+        self.assertFalse(self.memory.claim("a", -1001234567890))
+
+
 if __name__ == "__main__":
     unittest.main()

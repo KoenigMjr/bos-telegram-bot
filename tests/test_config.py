@@ -365,6 +365,54 @@ class MqttQosTests(ConfigTestCase):
             self.assertIsNone(cfg.parse_qos(bad), repr(bad))
 
 
+class SendingSettingsTests(ConfigTestCase):
+    def test_defaults_are_the_agreed_ones(self):
+        self.assertEqual(self.load()["sending"], {
+            "min_interval_seconds": 1.0, "max_per_second": 25.0, "attempts": 3,
+            "retry_pause_seconds": [2.0, 5.0], "max_wait_seconds": 120.0, "timeout_seconds": 15.0})
+
+    def test_a_partial_block_keeps_the_other_defaults(self):
+        sending = self.load("sending:\n  attempts: 5\n  min_interval_seconds: 2\n")["sending"]
+        self.assertEqual((sending["attempts"], sending["min_interval_seconds"]), (5, 2.0))
+        self.assertEqual(sending["max_per_second"], 25.0)
+        self.assertEqual(sending["retry_pause_seconds"], [2.0, 5.0])
+
+    def test_every_setting_can_be_changed(self):
+        sending = self.load("sending:\n  min_interval_seconds: 0.5\n  max_per_second: 10\n  attempts: 4\n"
+                            "  retry_pause_seconds: [1, 3, 10]\n  max_wait_seconds: 60\n  timeout_seconds: 20\n")["sending"]
+        self.assertEqual(sending, {"min_interval_seconds": 0.5, "max_per_second": 10.0, "attempts": 4,
+                                   "retry_pause_seconds": [1.0, 3.0, 10.0], "max_wait_seconds": 60.0, "timeout_seconds": 20.0})
+
+    def test_a_single_pause_is_accepted(self):
+        self.assertEqual(self.load("sending:\n  retry_pause_seconds: 4\n")["sending"]["retry_pause_seconds"], [4.0])
+
+    def test_attempts_of_one_means_no_repetition_and_is_valid(self):
+        self.assertEqual(self.load("sending:\n  attempts: 1\n")["sending"]["attempts"], 1)
+
+    def test_invalid_values_name_the_setting_and_the_value(self):
+        cases = {"min_interval_seconds": "-1", "max_per_second": "0", "attempts": "0", "retry_pause_seconds": "[]",
+                 "max_wait_seconds": "viel", "timeout_seconds": "0"}
+        for key, bad in cases.items():
+            message = self.expect_exit(f"sending:\n  {key}: {bad}\n")
+            self.assertIn(f"sending.{key} muss", message, key)
+
+    def test_a_typo_in_a_name_is_reported_with_the_valid_names(self):
+        message = self.expect_exit("sending:\n  versuche: 5\n")
+        self.assertIn("sending.versuche ist unbekannt", message)
+        self.assertIn("attempts", message)
+
+    def test_sending_must_be_a_block(self):
+        self.assertIn("sending muss ein Block sein", self.expect_exit("sending: 3\n"))
+
+    def test_removing_the_block_falls_back_to_the_defaults(self):
+        self.assertEqual(self.load("sending: null\n")["sending"]["attempts"], 3)
+
+    def test_reported_together_with_other_problems(self):
+        message = self.expect_exit("sending:\n  attempts: 0\nlogging:\n  level: laut\nmqtt:\n  qos: 5\n")
+        for expected in ("sending.attempts", "logging.level", "mqtt.qos"):
+            self.assertIn(expected, message)
+
+
 class CommandMapTests(ConfigTestCase):
     def test_collision_with_builtin_command(self):
         self.assertIn("Befehlsname-Kollision", self._collision("fields:\n  - for: start\n"))

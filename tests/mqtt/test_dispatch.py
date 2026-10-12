@@ -1,11 +1,14 @@
+import asyncio
 import unittest
+
+from telegram.error import TimedOut
 
 from bos_telegram_bot.storage import database as db
 from bos_telegram_bot.core.matching import wildcard_to_regex
 from bos_telegram_bot.mqtt import dispatch
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE, template_from_fields
 from bos_telegram_bot.core.delivery import DeliveryMemory
-from tests.helpers import Clock, Env
+from tests.helpers import Clock, Env, ScriptedBot, SendHarness
 
 NOTIFY = ["description", "message", "ric"]
 TEMPLATE = template_from_fields(NOTIFY)   # der Aufbau früherer Versionen
@@ -14,11 +17,11 @@ TEMPLATE = template_from_fields(NOTIFY)   # der Aufbau früherer Versionen
 class DistributionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.env = Env(self)
+        self.harness = SendHarness(self.env.bot)
 
     async def alarm(self, payload):
         self.env.bot.sent.clear()
-        app = type("App", (), {"bot": self.env.bot})()
-        await dispatch.handle_payload(app, self.env.db_path, self.env.context.bot_data["active_fields"], TEMPLATE, payload)
+        await self.harness.handle(self.env.db_path, self.env.context.bot_data["active_fields"], TEMPLATE, payload)
         return {m["chat_id"]: m["text"] for m in self.env.bot.sent}
 
     def sub(self, chat, field, target, alias="Alias", regex=False):
@@ -88,9 +91,8 @@ class TemplateInDistributionTests(unittest.IsolatedAsyncioTestCase):
     async def send(self, template, payload=None):
         env = Env(self)
         db.add_sub(env.db_path, 11, "ric", "1000011", "RIC: 1000011", False)
-        app = type("App", (), {"bot": env.bot})()
-        await dispatch.handle_payload(app, env.db_path, env.context.bot_data["active_fields"], template,
-                                payload or self.MULTICAST)
+        await SendHarness(env.bot).handle(env.db_path, env.context.bot_data["active_fields"], template,
+                                          payload or self.MULTICAST)
         return env.bot.sent[0]["text"]
 
     async def test_default_layout(self):
@@ -235,6 +237,7 @@ class FlakyBot:
 
 class AlarmLogTests(unittest.IsolatedAsyncioTestCase):
     LOGGER = "bos_telegram_bot.mqtt.dispatch"
+    ALL = "bos_telegram_bot"          # alle Logger des Bots: die Verteilung und der Sender
     ALARM = {"ric": "1000011", "description": "Wache Nord", "message": "TEST Beispieltext (Musterstraße 5)"}
 
     def setUp(self):
@@ -242,15 +245,15 @@ class AlarmLogTests(unittest.IsolatedAsyncioTestCase):
         db.add_sub(self.env.db_path, 11, "ric", "1000011", "RIC: 1000011", False)
 
     async def run_alarm(self, level, bot=None, payload=None):
-        app = type("App", (), {"bot": bot or self.env.bot})()
-        with self.assertLogs(self.LOGGER, level=level) as logged:
-            await dispatch.handle_payload(app, self.env.db_path, self.env.context.bot_data["active_fields"],
-                                          DEFAULT_TEMPLATE, payload or self.ALARM)
+        harness = SendHarness(bot or self.env.bot, attempts=1)
+        with self.assertLogs(self.ALL, level=level) as logged:
+            await harness.handle(self.env.db_path, self.env.context.bot_data["active_fields"],
+                                 DEFAULT_TEMPLATE, payload or self.ALARM)
         return logged.output
 
     async def test_one_info_line_for_a_delivered_alarm(self):
         output = await self.run_alarm("INFO")
-        self.assertEqual(output, [f"INFO:{self.LOGGER}:Alarm 1000011 (Wache Nord): 1 Abo(s) in 1 Chat(s), gesendet 1/1"])
+        self.assertEqual(output, [f"INFO:{self.LOGGER}:Alarm 1000011 (Wache Nord): 1 Abo(s) in 1 Chat(s), gesendet 1/1 in 0.0 s"])
 
     async def test_one_info_line_without_a_matching_subscription(self):
         output = await self.run_alarm("INFO", payload={"ric": "1000099", "description": "Wache Süd"})
@@ -262,12 +265,11 @@ class AlarmLogTests(unittest.IsolatedAsyncioTestCase):
         output = await self.run_alarm("INFO")
         self.assertIn("3 Abo(s) in 2 Chat(s), gesendet 2/2", output[0])
 
-    async def test_a_failed_send_is_a_warning_with_the_reason(self):
+    async def test_a_failed_send_is_logged_with_the_reason_and_the_alarm_ends_with_a_warning(self):
         output = await self.run_alarm("WARNING", bot=FlakyBot(failing=[11]))
         self.assertEqual(len(output), 2)
-        self.assertEqual(output[0], f"WARNING:{self.LOGGER}:Senden an Chat 11 fehlgeschlagen (TimedOut: Timed out)")
-        self.assertIn("gesendet 0/1", output[1])
-        self.assertTrue(output[1].startswith("WARNING:"))
+        self.assertEqual(output[0], "ERROR:bos_telegram_bot.chat.sender:Senden an Chat 11 aufgegeben nach 1 Versuchen (TimedOut: Timed out)")
+        self.assertEqual(output[1], f"WARNING:{self.LOGGER}:Alarm 1000011 (Wache Nord): 1 Abo(s) in 1 Chat(s), gesendet 0/1 in 0.0 s")
 
     async def test_partial_failure_counts_what_arrived(self):
         db.add_sub(self.env.db_path, 22, "ric", "1000011", "RIC: 1000011", False)
@@ -284,6 +286,13 @@ class AlarmLogTests(unittest.IsolatedAsyncioTestCase):
         output = "\n".join(await self.run_alarm("INFO"))
         self.assertNotIn("Beispieltext", output)
         self.assertNotIn("Musterstraße", output)
+
+    async def test_the_summary_comes_once_after_the_last_chat_has_a_result(self):
+        for chat in (22, 33):
+            db.add_sub(self.env.db_path, chat, "ric", "1000011", "RIC: 1000011", False)
+        output = await self.run_alarm("INFO")
+        self.assertEqual(len(output), 1)
+        self.assertIn("3 Abo(s) in 3 Chat(s), gesendet 3/3", output[0])
 
     async def test_debug_adds_matches_message_and_timing(self):
         output = "\n".join(await self.run_alarm("DEBUG"))
@@ -302,9 +311,8 @@ class AlarmLogTests(unittest.IsolatedAsyncioTestCase):
         with contextlib.redirect_stdout(out):
             logs.setup_logging("DEBUG")
             self.addCleanup(logs.reset_logging)
-            app = type("App", (), {"bot": self.env.bot})()
-            await dispatch.handle_payload(app, self.env.db_path, self.env.context.bot_data["active_fields"],
-                                          DEFAULT_TEMPLATE, self.ALARM)
+            await SendHarness(self.env.bot).handle(self.env.db_path, self.env.context.bot_data["active_fields"],
+                                                   DEFAULT_TEMPLATE, self.ALARM)
         lines = [line for line in out.getvalue().splitlines() if line.strip()]
         message = [line for line in lines if "Nachricht an Chat 11:" in line]
         self.assertEqual(len(message), 1)
@@ -357,13 +365,13 @@ class DuplicateTests(unittest.IsolatedAsyncioTestCase):
     def sub(self, chat, field, target):
         db.add_sub(self.env.db_path, chat, field, target, f"{field}: {target}", False)
 
-    async def deliver(self, payload, bot=None, memory="default"):
-        """Eine MQTT-Nachricht verarbeiten. Gibt die Chats zurück, an die gesendet wurde."""
+    async def deliver(self, payload, bot=None, memory="default", attempts=1):
+        """Eine MQTT-Nachricht verarbeiten und warten, bis sie zugestellt oder endgültig gescheitert ist.
+        Gibt die Chats zurück, an die gesendet wurde. attempts=1: ein Fehlschlag ist gleich endgültig."""
         bot = bot or FlakyBot()
         memory = self.memory if memory == "default" else memory
-        app = type("App", (), {"bot": bot})()
-        await dispatch.handle_payload(app, self.env.db_path, self.env.context.bot_data["active_fields"],
-                                      DEFAULT_TEMPLATE, payload, memory)
+        await SendHarness(bot, attempts=attempts).handle(self.env.db_path, self.env.context.bot_data["active_fields"],
+                                                         DEFAULT_TEMPLATE, payload, memory)
         return bot.sent
 
     async def test_an_alarm_and_its_copy_are_sent_once(self):
@@ -408,8 +416,8 @@ class DuplicateTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs(self.LOGGER, level="DEBUG") as logged:
             await self.deliver(copy_of(SINGLE))
         text = "\n".join(logged.output)
-        self.assertIn("Chat 11: Alarm schon zugestellt, übersprungen", text)
-        self.assertIn("Wiederholung, alle 1 Chat(s) schon beliefert", text)
+        self.assertIn("Chat 11: Alarm schon zugestellt oder in Arbeit, übersprungen", text)
+        self.assertIn("Wiederholung, alle 1 Chat(s) schon beliefert oder in Arbeit", text)
 
     async def test_a_failed_send_is_tried_again_by_the_copy(self):
         self.sub(11, "ric", "1000011")
@@ -482,6 +490,172 @@ class DuplicateTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs(self.LOGGER, level="DEBUG") as logged:
             await self.deliver(copy_of(SINGLE))
         self.assertIn("Wiederholung, weiterhin kein passendes Abo", logged.output[0])
+
+
+class QueuedDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    """Die Verteilung reiht nur ein. Jetzt kann eine Kopie eintreffen, während das Original noch wartet."""
+    LOGGER = "bos_telegram_bot.mqtt.dispatch"
+    ALL = "bos_telegram_bot"
+
+    def setUp(self):
+        self.env = Env(self)
+        self.memory = DeliveryMemory(300)
+        db.add_sub(self.env.db_path, 11, "ric", "1000011", "RIC: 1000011", False)
+
+    def harness(self, script=None, **settings):
+        self.h = SendHarness(ScriptedBot(None, script), **settings)
+        self.h.bot.clock = self.h.time.clock
+        return self.h
+
+    async def feed(self, payload, memory="default"):
+        """Verteilt einen Alarm, wartet aber NICHT, bis er zugestellt ist (wie der Empfang es auch nicht tut)."""
+        memory = self.memory if memory == "default" else memory
+        await dispatch.handle_payload(self.env.db_path, self.env.context.bot_data["active_fields"], DEFAULT_TEMPLATE,
+                                      payload, self.h.sender, memory)
+
+    async def finish(self):
+        await self.h.time.run_until_idle(self.h.sender)
+
+    async def test_handle_payload_returns_before_anything_is_sent(self):
+        self.harness()
+        await self.feed(SINGLE)
+        self.assertEqual(self.h.bot.calls, [])                      # nur eingereiht
+        self.assertEqual(self.h.sender.pending, 1)
+        await self.finish()
+        self.assertEqual(len(self.h.bot.texts(11)), 1)
+
+    async def test_a_copy_arriving_while_the_original_is_in_flight_is_not_queued_again(self):
+        gate = asyncio.get_running_loop().create_future()
+        self.harness(script={11: [gate]})
+        await self.feed(SINGLE)
+        await self.h.time.settle()                                  # das Original hängt bei Telegram
+        self.assertEqual(len(self.h.bot.calls), 1)
+        await self.feed(copy_of(SINGLE))
+        self.assertEqual(self.h.sender.pending, 1)                  # die Kopie wurde nicht eingereiht
+        gate.set_result(None)
+        await self.finish()
+        self.assertEqual(len(self.h.bot.calls), 1)
+        self.assertTrue(self.memory.is_delivered("1700000500.5", 11))
+
+    async def test_a_copy_arriving_while_the_original_is_still_waiting_is_not_queued_again(self):
+        """Das Original steht hinter einer anderen Nachricht an denselben Chat, die Kopie darf nicht dazukommen."""
+        self.harness()
+        other = dict(SINGLE, timestamp="1700000100.1", timestamp_list="1700000100.1")
+        await self.feed(other)
+        await self.feed(SINGLE)                                     # muss eine Sekunde Abstand zu 'other' halten
+        await self.feed(copy_of(SINGLE))
+        self.assertEqual(len(self.h.bot.calls), 1)                  # nur 'other' ist raus, das Original wartet noch
+        self.assertEqual(self.h.sender.pending, 1)                  # und die Kopie wurde nicht zusätzlich eingereiht
+        await self.finish()
+        self.assertEqual(len(self.h.bot.calls), 2)                  # 'other' und das Original, die Kopie nicht
+        self.assertEqual(self.h.bot.times(11)[1] - self.h.bot.times(11)[0], 1.0)
+
+    async def test_a_copy_during_the_retry_pause_does_not_duplicate_the_message(self):
+        self.harness(script={11: [TimedOut(), None]})
+        with self.assertLogs(self.ALL, level="WARNING"):
+            await self.feed(SINGLE)
+            await self.h.time.settle()                              # erster Versuch gescheitert, Pause läuft
+            self.assertEqual(len(self.h.bot.calls), 1)
+            await self.feed(copy_of(SINGLE))
+            await self.finish()
+        self.assertEqual(len(self.h.bot.calls), 2)                  # der Wiederholungsversuch, keine zweite Nachricht
+        self.assertTrue(self.memory.is_delivered("1700000500.5", 11))
+
+    async def test_after_a_final_failure_the_next_copy_may_try_again(self):
+        self.harness(script={11: [TimedOut(), TimedOut()]}, attempts=2)
+        await self.feed(SINGLE)
+        with self.assertLogs(self.ALL, level="ERROR"):
+            await self.finish()
+        self.assertEqual(len(self.h.bot.calls), 2)
+        self.assertFalse(self.memory.is_pending("1700000500.5", 11))      # Reservierung wurde freigegeben
+        self.assertFalse(self.memory.is_delivered("1700000500.5", 11))
+        with self.assertLogs(self.LOGGER, level="INFO") as logged:
+            await self.feed(copy_of(SINGLE))
+            await self.finish()
+        self.assertEqual(len(self.h.bot.calls), 3)
+        self.assertIn("Wiederholung, 1 Chat(s) noch offen, gesendet 1/1", logged.output[0])
+        self.assertTrue(self.memory.is_delivered("1700000500.5", 11))
+
+    async def test_while_the_chat_is_pending_a_later_copy_is_skipped_and_logged_at_debug(self):
+        gate = asyncio.get_running_loop().create_future()
+        self.harness(script={11: [gate]})
+        await self.feed(SINGLE)
+        await self.h.time.settle()
+        with self.assertLogs(self.LOGGER, level="DEBUG") as logged:
+            await self.feed(copy_of(SINGLE))
+        text = "\n".join(logged.output)
+        self.assertIn("Chat 11: Alarm schon zugestellt oder in Arbeit, übersprungen", text)
+        self.assertIn("Wiederholung, alle 1 Chat(s) schon beliefert oder in Arbeit", text)
+        gate.set_result(None)
+        await self.finish()
+
+    async def test_the_summary_waits_for_the_slowest_chat_and_names_the_total_time(self):
+        for chat in (22, 33):
+            db.add_sub(self.env.db_path, chat, "ric", "1000011", "RIC: 1000011", False)
+        gate = asyncio.get_running_loop().create_future()
+        self.harness(script={33: [gate]})
+        with self.assertLogs(self.LOGGER, level="INFO") as logged:
+            await self.feed(SINGLE)
+            await self.h.time.run_until(lambda: self.h.sender.pending == 1)   # zwei fertig, Chat 33 hängt noch
+            self.h.time.now += 3.0
+            gate.set_result(None)
+            await self.finish()
+        self.assertEqual(len(logged.output), 1)                              # erst jetzt, einmal
+        self.assertRegex(logged.output[0], r"3 Abo\(s\) in 3 Chat\(s\), gesendet 3/3 in 3\.\d s")
+
+    async def test_the_summary_time_includes_the_retry_pause(self):
+        self.harness(script={11: [TimedOut(), None]})
+        with self.assertLogs(self.LOGGER, level="INFO") as logged:
+            await self.feed(SINGLE)
+            with self.assertLogs("bos_telegram_bot.chat.sender", level="WARNING"):
+                await self.finish()
+        self.assertEqual(logged.output, [
+            f"INFO:{self.LOGGER}:Alarm 1000011 (Wache Nord): 1 Abo(s) in 1 Chat(s), gesendet 1/1 in 2.0 s"])
+
+    async def test_the_default_settings_try_three_times(self):
+        self.harness(script={11: [TimedOut(), TimedOut(), None]})
+        await self.feed(SINGLE)
+        with self.assertLogs(self.ALL, level="WARNING"):
+            await self.finish()
+        self.assertEqual(self.h.bot.times(11), [self.h.time.now - 7.0, self.h.time.now - 5.0, self.h.time.now])
+        self.assertTrue(self.memory.is_delivered("1700000500.5", 11))
+
+    async def test_a_chat_that_cannot_be_queued_does_not_stop_the_others(self):
+        db.add_sub(self.env.db_path, 22, "ric", "1000011", "RIC: 1000011", False)
+        self.harness()
+        real = self.h.sender.submit
+
+        def submit(chat_id, text, on_result):
+            if chat_id == 22:
+                raise RuntimeError("kaputt")
+            real(chat_id, text, on_result)
+
+        self.h.sender.submit = submit
+        with self.assertLogs(self.ALL, level="WARNING") as logged:
+            await self.feed(SINGLE)
+            await self.finish()
+        self.assertEqual(len(self.h.bot.texts()), 1)                         # Chat 11 bekam seinen Alarm
+        self.assertFalse(self.memory.is_pending("1700000500.5", 22))        # und die Reservierung für 22 ist wieder frei
+        self.assertTrue(any("Einreihen für Chat 22 fehlgeschlagen" in line for line in logged.output))
+        self.assertTrue(any("gesendet 1/2" in line and line.startswith("WARNING:") for line in logged.output))
+
+    async def test_without_a_memory_the_copy_is_queued_again(self):
+        self.harness()
+        await self.feed(SINGLE, memory=None)
+        await self.feed(copy_of(SINGLE), memory=None)
+        await self.finish()
+        self.assertEqual(len(self.h.bot.calls), 2)
+
+    async def test_a_burst_of_chats_leaves_nothing_behind(self):
+        for chat in range(100, 160):
+            db.add_sub(self.env.db_path, chat, "ric", "1000011", "RIC: 1000011", False)
+        self.harness()
+        await self.feed(SINGLE)
+        await self.feed(copy_of(SINGLE))
+        await self.finish()
+        self.assertEqual(len(self.h.bot.calls), 61)                           # 60 + Chat 11, jeder genau einmal
+        self.assertEqual(len({c["chat_id"] for c in self.h.bot.calls}), 61)
+        self.assertEqual((self.h.sender.pending, self.h.sender.queued), (0, 0))
 
 
 if __name__ == "__main__":

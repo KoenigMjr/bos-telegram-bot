@@ -10,6 +10,7 @@ from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandle
 from bos_telegram_bot import config as cfg
 from bos_telegram_bot import logs
 from bos_telegram_bot.chat import admin, buttons, fields, overview, prompts
+from bos_telegram_bot.chat.sender import SHUTDOWN_SECONDS, Sender
 from bos_telegram_bot.core.delivery import DeliveryMemory
 from bos_telegram_bot.mqtt.listener import start_mqtt_listener
 from bos_telegram_bot.storage import database as db
@@ -60,7 +61,23 @@ async def post_init(app):
         except Exception as e:
             log.info("Admin-Befehlsmenü für %s nicht gesetzt (hat der Admin dem Bot schon geschrieben?): %s", admin_id, e)
 
-    asyncio.create_task(start_mqtt_listener(app))
+    # Der Versand: Alarme gehen in eine Warteschlange, der Empfang von MQTT wartet nie auf Telegram.
+    app.bot_data["sender"] = Sender.from_config(app.bot, app.bot_data["config"]["sending"])
+    app.bot_data["mqtt_task"] = asyncio.create_task(start_mqtt_listener(app))
+
+
+async def post_stop(app):
+    """Beim Beenden (z.B. docker stop): keine neuen Alarme mehr annehmen, aber was schon in der Warteschlange
+    steht, noch zustellen. Läuft vor dem Schließen der Verbindung zu Telegram."""
+    task = app.bot_data.get("mqtt_task")
+    if task is not None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    sender = app.bot_data.get("sender")
+    if sender is not None:
+        if sender.pending:
+            log.info("Der Bot wird beendet, %d Nachricht(en) werden noch zugestellt", sender.pending)
+        await sender.close(SHUTDOWN_SECONDS)
 
 
 def main():
@@ -113,7 +130,12 @@ def main():
     log.debug("Doppelte Alarme: %s",
               f"werden {remember_seconds:g} s lang erkannt" if delivered else "Erkennung abgeschaltet")
 
-    app = ApplicationBuilder().token(token).post_init(post_init).build()
+    timeout = config["sending"]["timeout_seconds"]
+    log.debug("Versand: %g s Abstand je Chat, höchstens %g/s, %d Versuche, Pausen %s s, Höchstwartezeit %g s, Zeitüberschreitung %g s",
+              config["sending"]["min_interval_seconds"], config["sending"]["max_per_second"], config["sending"]["attempts"],
+              config["sending"]["retry_pause_seconds"], config["sending"]["max_wait_seconds"], timeout)
+    app = (ApplicationBuilder().token(token).connect_timeout(timeout).read_timeout(timeout).write_timeout(timeout)
+           .post_init(post_init).post_stop(post_stop).build())
     app.bot_data.update({
         "config": config,
         "admins": admins,

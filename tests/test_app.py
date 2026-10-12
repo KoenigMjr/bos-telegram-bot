@@ -1,4 +1,5 @@
 """Integrationstest: das echte main() mit allem, was beim Start passiert (ohne Netzwerk)."""
+import asyncio
 import datetime as dt
 import io
 import logging
@@ -15,7 +16,8 @@ from bos_telegram_bot import app as bot_app
 from bos_telegram_bot import config as cfg
 from bos_telegram_bot import logs
 from bos_telegram_bot.core.delivery import DeliveryMemory
-from tests.helpers import make_entries
+from bos_telegram_bot.chat.sender import Sender
+from tests.helpers import FakeBot, ScriptedBot, make_entries
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE
 
 CSV = "for,add,isRegex\n1234567,Rettungswagen Musterstadt A-Wehr,false\n^23456([0-9]{2})$,Feuerwehr Musterstadt,true\n"
@@ -394,6 +396,151 @@ class QosStartupTests(WiringTestCase):
         with self.assertRaises(SystemExit) as ctx:
             self.start(MQTT_QOS="2")
         self.assertIn("mqtt.qos muss 0 oder 1 sein", str(ctx.exception))
+
+
+class AsyncWiringTestCase(WiringTestCase, unittest.IsolatedAsyncioTestCase):
+    """Wie WiringTestCase, für Tests, die post_init und post_stop (async) aufrufen."""
+
+    async def init(self, **env):
+        """Startet main() ohne Netzwerk und ruft post_init mit ersetztem Telegram und ersetztem MQTT-Listener auf."""
+        app = self.start(**env)
+
+        async def listener_stub(application):          # läuft, bis er abgebrochen wird
+            self.listener_saw_sender = application.bot_data.get("sender")
+            await asyncio.Event().wait()
+
+        self.listener_saw_sender = None
+        with patch.object(type(app.bot), "set_my_commands", unittest.mock.AsyncMock()), \
+                patch.object(bot_app, "start_mqtt_listener", listener_stub):
+            await bot_app.post_init(app)
+            await asyncio.sleep(0)                      # den Listener einmal anlaufen lassen
+        self.addCleanup(lambda: app.bot_data["mqtt_task"].cancel())
+        return app
+
+
+class SendingStartupTests(AsyncWiringTestCase):
+    def write_config(self, text):
+        with open("data/config.yaml", "w", encoding="utf-8") as f:
+            f.write(text)
+
+    async def test_post_init_creates_the_sender_from_the_config_and_starts_the_listener(self):
+        self.write_config("sending:\n  attempts: 5\n  min_interval_seconds: 2\n")
+        app = await self.init()
+        sender = app.bot_data["sender"]
+        self.assertIsInstance(sender, Sender)
+        self.assertIs(sender.bot, app.bot)
+        self.assertEqual((sender.attempts, sender.min_interval, sender.retry_pauses), (5, 2.0, [2.0, 5.0]))
+        task = app.bot_data["mqtt_task"]
+        self.assertFalse(task.done())
+
+    async def test_the_sender_exists_before_the_listener_starts(self):
+        app = await self.init()
+        self.assertIs(self.listener_saw_sender, app.bot_data["sender"])
+
+    async def test_the_defaults_are_used_without_a_config_file(self):
+        sender = (await self.init()).bot_data["sender"]
+        self.assertEqual((sender.attempts, sender.min_interval, sender.max_wait), (3, 1.0, 120.0))
+
+    def test_the_lifecycle_hooks_are_registered(self):
+        app = self.start()
+        self.assertIs(app.post_init, bot_app.post_init)
+        self.assertIs(app.post_stop, bot_app.post_stop)
+
+    def test_the_timeout_for_telegram_requests_comes_from_the_config(self):
+        for text, expected in (("", 15.0), ("sending:\n  timeout_seconds: 30\n", 30.0)):
+            self.write_config(text)
+            timeout = self.start().bot._request[1]._client.timeout
+            self.assertEqual((timeout.read, timeout.write, timeout.connect), (expected, expected, expected), text)
+
+    def test_the_library_default_of_five_seconds_is_gone(self):
+        timeout = self.start().bot._request[1]._client.timeout
+        self.assertNotEqual(timeout.read, 5.0)
+
+    def test_debug_lists_the_sending_settings(self):
+        self.start(LOG_LEVEL="debug")
+        self.assertIn("Versand: 1 s Abstand je Chat, höchstens 25/s, 3 Versuche, Pausen [2.0, 5.0] s, "
+                      "Höchstwartezeit 120 s, Zeitüberschreitung 15 s", self.output.getvalue())
+
+    def test_an_invalid_setting_stops_the_start_with_an_explanation(self):
+        self.write_config("sending:\n  attempts: 0\n")
+        with self.assertRaises(SystemExit) as ctx:
+            self.start()
+        self.assertIn("sending.attempts muss eine ganze Zahl von 1 bis 10 sein", str(ctx.exception))
+
+
+class ShutdownTests(AsyncWiringTestCase):
+    LOGGER = "bos_telegram_bot.app"
+
+    def fast_sender(self, app, bot):
+        sender = Sender.from_config(bot, {"min_interval_seconds": 0, "max_per_second": 1000})
+        app.bot_data["sender"] = sender
+        return sender
+
+    async def test_post_stop_stops_the_listener(self):
+        app = await self.init()
+        task = app.bot_data["mqtt_task"]
+        await bot_app.post_stop(app)
+        self.assertTrue(task.cancelled())
+
+    async def test_post_stop_closes_the_sender_so_nothing_new_is_accepted(self):
+        app = await self.init()
+        sender = app.bot_data["sender"]
+        await bot_app.post_stop(app)
+        results = []
+        sender.submit(1, "zu spät", lambda chat, ok, why: results.append((ok, why)))
+        self.assertEqual(results, [(False, "Versand ist beendet")])
+
+    async def test_post_stop_still_delivers_what_is_waiting(self):
+        app = await self.init()
+        bot = FakeBot()
+        sender = self.fast_sender(app, bot)
+        for text in ("a", "b", "c"):
+            sender.submit(11, text, lambda *args: None)
+        await bot_app.post_stop(app)
+        self.assertEqual([m["text"] for m in bot.sent], ["a", "b", "c"])
+        self.assertEqual(sender.pending, 0)
+
+    async def test_post_stop_says_how_many_messages_it_is_still_delivering(self):
+        app = await self.init()
+        hanging = asyncio.get_running_loop().create_future()       # die erste hängt, damit der Stand eindeutig ist
+        sender = self.fast_sender(app, ScriptedBot(script={11: [hanging]}))
+        for text in ("a", "b"):
+            sender.submit(11, text, lambda *args: None)
+        with patch.object(bot_app, "SHUTDOWN_SECONDS", 0.05), self.assertLogs(self.LOGGER, level="INFO") as logged:
+            with self.assertLogs("bos_telegram_bot.chat.sender", level="ERROR"):
+                await asyncio.wait_for(bot_app.post_stop(app), 2)
+        self.assertEqual(logged.output, [f"INFO:{self.LOGGER}:Der Bot wird beendet, 2 Nachricht(en) werden noch zugestellt"])
+
+    async def test_post_stop_is_quiet_when_nothing_is_waiting(self):
+        app = await self.init()
+        with self.assertRaises(AssertionError):                 # assertLogs schlägt fehl, wenn nichts geloggt wurde
+            with self.assertLogs(self.LOGGER, level="INFO"):
+                await bot_app.post_stop(app)
+
+    async def test_post_stop_gives_up_after_the_shutdown_time_and_reports_the_rest(self):
+        app = await self.init()
+        hanging = asyncio.get_running_loop().create_future()
+        sender = self.fast_sender(app, ScriptedBot(script={11: [hanging]}))
+        results = []
+        sender.submit(11, "haengt", lambda chat, ok, why: results.append(ok))
+        await asyncio.sleep(0)
+        with patch.object(bot_app, "SHUTDOWN_SECONDS", 0.05), \
+                self.assertLogs("bos_telegram_bot.chat.sender", level="ERROR") as logged:
+            await asyncio.wait_for(bot_app.post_stop(app), 2)
+        self.assertIn("Beim Beenden nicht zugestellt: 1 Nachricht(en)", logged.output[0])
+        self.assertEqual(results, [False])
+
+    async def test_post_stop_uses_the_configured_shutdown_constant(self):
+        from bos_telegram_bot.chat.sender import SHUTDOWN_SECONDS
+        self.assertIs(bot_app.SHUTDOWN_SECONDS, SHUTDOWN_SECONDS)
+
+    async def test_post_stop_without_sender_and_listener_is_harmless(self):
+        await bot_app.post_stop(type("App", (), {"bot_data": {}})())
+
+    async def test_post_stop_can_be_called_twice(self):
+        app = await self.init()
+        await bot_app.post_stop(app)
+        await bot_app.post_stop(app)
 
 
 class StartupErrorTests(WiringTestCase):

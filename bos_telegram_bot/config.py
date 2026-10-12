@@ -12,6 +12,7 @@ import re
 
 import yaml
 
+from bos_telegram_bot.core import sending as sending_settings
 from bos_telegram_bot.core.delivery import DEFAULT_SECONDS as DEFAULT_REMEMBER_SECONDS
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE, FIELD_NAME, template_from_fields, validate_template
 from bos_telegram_bot.logs import LEVELS, normalize_level
@@ -172,6 +173,8 @@ def validate_config(config: dict, path: str) -> None:
         problems.append("logging muss ein Block sein, z.B. 'logging:' mit 'level: INFO' darunter")
     elif isinstance(log_block, dict) and "level" in log_block and normalize_level(log_block["level"]) is None:
         problems.append(f"logging.level muss eines von {', '.join(LEVELS)} sein (ist '{log_block['level']}')")
+    if "sending" in config:
+        problems += sending_settings.problems(config["sending"])
     duplicates = config.get("duplicates")
     if "duplicates" in config and not isinstance(duplicates, dict):
         problems.append("duplicates muss ein Block sein, z.B. 'duplicates:' mit 'remember_seconds: 300' darunter")
@@ -307,6 +310,7 @@ def load_config() -> dict:
     log_settings["level"] = normalize_level(log_settings.get("level", "INFO"))
     duplicate_settings = config.setdefault("duplicates", {})
     duplicate_settings.setdefault("remember_seconds", DEFAULT_REMEMBER_SECONDS)
+    config["sending"] = sending_settings.normalized(config.get("sending"))
     normalize_entries(config)
     resolve_csv_paths(config)
     return config

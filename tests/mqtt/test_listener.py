@@ -10,7 +10,7 @@ from bos_telegram_bot.core.delivery import DeliveryMemory, alarm_key
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE
 from bos_telegram_bot.mqtt import dispatch, listener
 from bos_telegram_bot.storage import database as db
-from tests.helpers import Env
+from tests.helpers import Env, ScriptedBot, SendHarness
 
 LOGGER = "bos_telegram_bot.mqtt.listener"
 TOPIC = "homeassistant/boswatch/alarm/1000011"
@@ -91,6 +91,7 @@ class ListenerTestCase(unittest.IsolatedAsyncioTestCase):
         return NS(bot_data={
             "config": {"mqtt": conf, "files": {"db_path": "unused.sqlite3"}},
             "entries": ["entries"], "active_fields": {"ric"}, "notification_template": "{RIC}", "last_payload": None,
+            "sender": SENDER,
         })
 
     async def run_listener(self, app, *sessions, stops_after=1, handle=None):
@@ -110,7 +111,7 @@ class ListenerLoopTests(ListenerTestCase):
         app = self.make_app()
         _, handle, learn, _ = await self.run_listener(app, [message(ALARM)])
         expected = {"ric": "1000011", "description": "Wache Nord", "message": "TEST"}
-        handle.assert_awaited_once_with(app, "unused.sqlite3", {"ric"}, "{RIC}", expected, None)   # None: kein Gedächtnis
+        handle.assert_awaited_once_with("unused.sqlite3", {"ric"}, "{RIC}", expected, SENDER, None)   # None: kein Gedächtnis
         learn.assert_awaited_once_with("unused.sqlite3", ["entries"], expected)
         self.assertEqual(app.bot_data["last_payload"], expected)
 
@@ -126,7 +127,7 @@ class ListenerLoopTests(ListenerTestCase):
         app = self.make_app()
         second = '{"ric": "1000043"}'
         _, handle, _, _ = await self.run_listener(app, [message(""), message(ALARM), message("x"), message(second)])
-        self.assertEqual([c.args[4]["ric"] for c in handle.await_args_list], ["1000011", "1000043"])
+        self.assertEqual([c.args[3]["ric"] for c in handle.await_args_list], ["1000011", "1000043"])
 
     async def test_connection_parameters_and_subscription(self):
         app = self.make_app(username="bot", password="geheim", port=1884)
@@ -172,7 +173,7 @@ class ListenerLoopTests(ListenerTestCase):
         app = self.make_app()
         broker, handle, _, sleep = await self.run_listener(app, [message(ALARM)], [message('{"ric": "1000043"}')], stops_after=2)
         self.assertEqual(len(broker.clients), 2)
-        self.assertEqual([c.args[4]["ric"] for c in handle.await_args_list], ["1000011", "1000043"])
+        self.assertEqual([c.args[3]["ric"] for c in handle.await_args_list], ["1000011", "1000043"])
         self.assertEqual(sleep.await_count, 2)
 
     async def test_debug_shows_raw_messages_and_why_something_was_ignored(self):
@@ -191,6 +192,9 @@ class ListenerLoopTests(ListenerTestCase):
         self.assertEqual(len(logged.output), 2)            # nur "Verbunden" und "Verbindung gestört"
 
 
+SENDER = NS(name="sender")        # der Listener reicht den Sender nur durch
+
+
 ALARM_COPY = '{"timestamp": "1700000000.1", "ric": "1000011", "republished": true}'
 ALARM_ORIGINAL = '{"timestamp": "1700000000.1", "ric": "1000011"}'
 
@@ -206,7 +210,7 @@ class RepeatedAlarmTests(ListenerTestCase):
     @staticmethod
     def registering_handle():
         """Ein handle_payload, das den Alarm wie das echte im Gedächtnis einträgt."""
-        async def handle(app, db_path, fields, template, payload, delivered):
+        async def handle(db_path, fields, template, payload, sender, delivered):
             delivered.register(alarm_key(payload))
         return AsyncMock(side_effect=handle)
 
@@ -214,6 +218,7 @@ class RepeatedAlarmTests(ListenerTestCase):
         app = self.app_with_memory()
         _, handle, _, _ = await self.run_listener(app, [message(ALARM_ORIGINAL)])
         self.assertIs(handle.await_args.args[5], app.bot_data["delivered"])
+        self.assertIs(handle.await_args.args[4], SENDER)
 
     async def test_a_repeat_is_neither_learned_again_nor_shown_as_last_payload(self):
         app = self.app_with_memory()
@@ -258,16 +263,20 @@ class WholeChainTests(unittest.IsolatedAsyncioTestCase):
     FIRST = dict(MERGED, ric="1000011", description="Wache Nord", timestamp="1700000000.1")
     SECOND = dict(MERGED, ric="1000043", description="Lagedienst Musterstadt", timestamp="1700000000.4")
 
-    async def run_chain(self, env, memory, messages):
+    async def run_chain(self, env, memory, messages, bot=None, wait=True):
+        harness = self.harness = SendHarness(bot or env.bot)
         app = NS(bot=env.bot, bot_data={
             "config": {"mqtt": {"host": "mqtt.test", "port": 1883, "topic": "alarm/+"}, "files": {"db_path": env.db_path}},
             "entries": env.entries, "active_fields": env.context.bot_data["active_fields"],
             "notification_template": DEFAULT_TEMPLATE, "last_payload": None, "delivered": memory,
+            "sender": harness.sender,
         })
         sleep = AsyncMock(side_effect=asyncio.CancelledError())
         with patch.object(listener.aiomqtt, "Client", FakeBroker(messages)), patch.object(listener.asyncio, "sleep", sleep):
             with self.assertRaises(asyncio.CancelledError):
                 await listener.start_mqtt_listener(app)
+        if wait:
+            await harness.time.run_until_idle(harness.sender)     # der Empfang wartet nicht, der Versand läuft danach zu Ende
         return app
 
     def burst(self):
@@ -294,6 +303,28 @@ class WholeChainTests(unittest.IsolatedAsyncioTestCase):
         env.bot.sent.clear()
         await self.run_chain(env, None, self.burst())
         self.assertEqual([m["chat_id"] for m in env.bot.sent], [11, 11, 11, 11])
+
+    async def test_a_hanging_telegram_call_does_not_hold_up_the_receiving_of_the_next_alarm(self):
+        """Der Zweck der Warteschlange: Heute hätte der hängende Aufruf für Chat 11 die Verarbeitung des nächsten
+        Alarms um die Zeitüberschreitung (5 s) verzögert."""
+        env = Env(self)
+        db.add_sub(env.db_path, 11, "ric", "1000011", "RIC: 1000011", False)
+        db.add_sub(env.db_path, 22, "ric", "1000043", "RIC: 1000043", False)
+        gate = asyncio.get_running_loop().create_future()
+        bot = ScriptedBot(script={11: [gate]})
+        first = {"timestamp": "1700000001.0", "ric": "1000011", "description": "Wache Nord"}
+        second = {"timestamp": "1700000002.0", "ric": "1000043", "description": "Wache Süd"}
+        app = await self.run_chain(env, DeliveryMemory(300), [message(json.dumps(first)), message(json.dumps(second))],
+                                   bot=bot, wait=False)
+        # Der Empfang hat beide Alarme angenommen, obwohl der erste bei Telegram hängt ...
+        self.assertEqual(app.bot_data["last_payload"]["ric"], "1000043")
+        # ... und der zweite Chat bekommt seinen Alarm, während Chat 11 noch wartet.
+        await self.harness.time.run_until(lambda: bot.texts(22))
+        self.assertEqual(len(bot.texts(22)), 1)
+        self.assertEqual(self.harness.sender.pending, 1)
+        gate.set_result(None)
+        await self.harness.time.run_until_idle(self.harness.sender)
+        self.assertEqual(len(bot.texts(11)), 1)
 
     async def test_a_burst_is_learned_only_once_but_learns_every_recipient(self):
         env = Env(self)
