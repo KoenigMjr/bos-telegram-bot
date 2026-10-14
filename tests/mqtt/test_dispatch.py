@@ -10,7 +10,7 @@ from bos_telegram_bot.core.matching import wildcard_to_regex
 from bos_telegram_bot.mqtt import dispatch
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE, template_from_fields
 from bos_telegram_bot.core.delivery import DeliveryMemory
-from tests.helpers import Clock, Env, ScriptedBot, SendHarness
+from tests.helpers import BERLIN, Clock, Env, ScriptedBot, SendHarness, time_zone
 
 NOTIFY = ["description", "message", "ric"]
 TEMPLATE = template_from_fields(NOTIFY)   # der Aufbau früherer Versionen
@@ -844,6 +844,72 @@ class ChatTemplateDeliveryTests(unittest.IsolatedAsyncioTestCase):
         db.set_chat_template(self.env.db_path, 11, "EIGEN {RIC}", 11)
         db.delete_chat_template(self.env.db_path, 11)
         self.assertIn("BOS-ALARM", (await self.deliver())[11])
+
+
+class WildcardDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    """{TIME} und die Kurznamen von BOSWatch3 beim echten Alarm."""
+    LOGGER = "bos_telegram_bot.mqtt.dispatch"
+
+    def setUp(self):
+        self.env = Env(self)
+        for chat in (11, 22):
+            db.add_sub(self.env.db_path, chat, "ric", "1000011", "RIC: 1000011", False)
+            db.set_chat_template(self.env.db_path, chat, "{TIME}{BR}{MSG}", chat)
+        zone = time_zone("UTC")
+        zone.__enter__()
+        self.addCleanup(zone.__exit__, None, None, None)
+
+    async def deliver(self, payload, memory=None):
+        self.env.bot.sent.clear()
+        await SendHarness(self.env.bot, attempts=1).handle(self.env.db_path, {"ric"}, DEFAULT_TEMPLATE, payload, memory)
+        return {m["chat_id"]: m["text"] for m in self.env.bot.sent}
+
+    async def test_time_is_the_time_of_the_alarm_for_every_chat(self):
+        texts = await self.deliver(dict(SINGLE, timestamp="1700000500.5", timestamp_list="1700000500.5"))
+        self.assertEqual(texts, {11: "14.11.2023 22:21:40\nTEST", 22: "14.11.2023 22:21:40\nTEST"})
+
+    async def test_it_follows_the_time_zone_of_the_container(self):
+        with time_zone(BERLIN):
+            texts = await self.deliver(dict(SINGLE, timestamp="1700000500.5", timestamp_list="1700000500.5"))
+        self.assertEqual(texts[11], "14.11.2023 23:21:40\nTEST")
+
+    async def test_a_delayed_delivery_does_not_change_the_time(self):
+        with patch("bos_telegram_bot.core.template._now", return_value=1900000000.0):          # Stunden später
+            texts = await self.deliver(dict(SINGLE, timestamp="1700000500.5", timestamp_list="1700000500.5"))
+        self.assertEqual(texts[11].splitlines()[0], "14.11.2023 22:21:40")
+
+    async def test_every_copy_of_a_multicast_shows_the_same_time(self):
+        lists = "1700000500.5, 1700000500.9"
+        first = await self.deliver(dict(SINGLE, timestamp="1700000500.5", timestamp_list=lists))
+        second = await self.deliver(dict(SINGLE, timestamp="1700000500.9", timestamp_list=lists))
+        self.assertEqual(first[11], second[11])
+
+    async def test_the_time_changes_with_the_next_alarm(self):
+        first = await self.deliver(dict(SINGLE, timestamp="1700000500.5", timestamp_list="1700000500.5"))
+        second = await self.deliver(dict(SINGLE, timestamp="1700003000.5", timestamp_list="1700003000.5"))
+        self.assertNotEqual(first[11], second[11])
+        self.assertTrue(second[11].startswith("14.11.2023 23:03:20"))
+
+    async def test_without_a_timestamp_the_alarm_still_arrives_with_the_current_time(self):
+        payload = {k: v for k, v in SINGLE.items() if not k.startswith("timestamp")}
+        with patch("bos_telegram_bot.core.template._now", return_value=1700000000.0):
+            texts = await self.deliver(payload)
+        self.assertEqual(texts[11], "14.11.2023 22:13:20\nTEST")
+
+    async def test_the_default_template_is_not_affected(self):
+        db.delete_chat_template(self.env.db_path, 11)
+        texts = await self.deliver(dict(SINGLE, timestamp="1700000500.5", timestamp_list="1700000500.5"))
+        self.assertIn("BOS-ALARM", texts[11])
+        self.assertNotIn("14.11.2023", texts[11])
+        self.assertTrue(texts[22].startswith("14.11.2023"))
+
+    async def test_the_global_template_from_the_config_may_use_them_too(self):
+        db.delete_chat_template(self.env.db_path, 11)
+        db.delete_chat_template(self.env.db_path, 22)
+        self.env.bot.sent.clear()
+        await SendHarness(self.env.bot, attempts=1).handle(
+            self.env.db_path, {"ric"}, "{MSG} um {TIME}", dict(SINGLE, timestamp="1700000500.5", timestamp_list="1700000500.5"))
+        self.assertEqual({m["text"] for m in self.env.bot.sent}, {"TEST um 14.11.2023 22:21:40"})
 
 
 if __name__ == "__main__":

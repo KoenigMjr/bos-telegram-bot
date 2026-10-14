@@ -34,7 +34,7 @@ die Alarme als JSON sendet.
    | `CSV_PATH_RIC`       | nein    | CSV mit RIC → Name, siehe [Namen für RIC und Fahrzeuge](#namen-für-ric-und-fahrzeuge) |
    | `EXTRA_FIELDS`       | nein    | Weitere Felder aus dem Alarm als Befehl, z.B. `stadtteil,objekt` |
    | `LOG_LEVEL`          | nein    | Standard `INFO`, für die Fehlersuche `DEBUG`, siehe [Logs](#logs) |
-   | `TZ`                 | nein    | Zeitzone der Logzeiten, z.B. `Europe/Berlin` (Standard: UTC)       |
+   | `TZ`                 | nein    | Zeitzone der Logzeiten und von `{TIME}`, z.B. `Europe/Berlin` (Standard: UTC) |
 
 4. **Dem Bot `/start` schreiben.** Fertig.
 
@@ -328,14 +328,17 @@ notification:
     <i>abonniert über: {MATCHED}</i>
 ```
 
-Das ist zugleich die Standard-Vorlage. Die Platzhalter schreibst du wie bei BOSWatch3 in
-Großbuchstaben, die Schreibweise des Feldes im Alarm ist egal (`{SUBRICTEXT}` findet `subricText`).
+Das ist zugleich die Standard-Vorlage. Die Platzhalter schreibst du in Großbuchstaben, die Schreibweise
+des Feldes im Alarm ist egal (`{SUBRICTEXT}` findet `subricText`).
 
 | Platzhalter        | Bedeutung |
 |--------------------|-----------|
 | `{FELD}`           | Wert eines Feldes aus dem Alarm, z.B. `{MESSAGE}`, `{RIC}` |
 | `{FELD_LIST}`      | alle Werte eines Multicast-Alarms (BOSWatch3-Feld `feld_list`), **eine Zeile pro Wert**. Leere und doppelte Einträge entfallen. Gibt es keine Liste, gilt der einzelne Wert |
 | `{MATCHED}`        | Name des passenden Abos |
+| `{TIME}`           | Zeitpunkt des Alarms im Format von BOSWatch3 (`14.11.2023 23:13:20`), in der Zeitzone des Containers (`TZ`). Bei Multicast gilt der erste Zeitstempel, in jedem Chat und bei jeder Kopie derselbe Wert |
+| `{BR}`, `{LPAR}`, `{RPAR}` | Zeilenumbruch, `(` und `)` wie bei BOSWatch3. Reiner Text, kein Datenfeld: Eine Zeile bleibt nicht allein deshalb stehen |
+| `{MSG}` u.a.       | die **Kurznamen von BOSWatch3** gehen auch, siehe unten |
 | `{A\|B}`           | Rückfall: der erste Platzhalter, der nicht leer ist, z.B. `{DESCRIPTION_LIST\|RIC_LIST}` |
 | `{{` und `}}`      | wörtliche geschweifte Klammern |
 
@@ -355,6 +358,40 @@ So werden Zeilen behandelt:
   Ungültiges HTML, falsche Klammern oder unbekannte Tags meldet der Bot beim Start mit allen
   Fehlern, statt Nachrichten zu verlieren. Ergibt die Vorlage überhaupt keinen Text, gilt die
   Standard-Vorlage.
+
+### Welche Platzhalter gibt es? Der Bot lernt keine
+
+Es gibt keine feste Liste und der Bot muss auch keine Platzhalter lernen: **Jedes Feld im Alarm** (dem JSON von
+BOSWatch3) geht sofort als `{FELDNAME}`. So kommen auch Felder von BOSWatch3-Modulen wie `descriptor` von allein
+dazu. Welche Felder ein Alarm hat, zeigt `/lastraw`. Gelernt werden nur **Namen** (RIC → Beschreibung, siehe
+[Namen für RIC und Fahrzeuge](#namen-für-ric-und-fahrzeuge)), keine Platzhalter.
+
+BOSWatch3 selbst benutzt für seine Texte **Kurznamen** (`{MSG}` statt `{MESSAGE}`). Diese gehen hier auch, damit
+sich ein Text aus BOSWatch3 übernehmen lässt. Ein Feld, das genau so heißt wie der Kurzname, hat Vorrang. Die
+Kurznamen sind in der
+[Dokumentation von BOSWatch3](https://docs.boswatch.de/develop/packet.html) beschrieben:
+
+| Kurzname | Feld | Kurzname | Feld |
+|---|---|---|---|
+| `{SNAME}` | `serverName` | `{SVERS}` | `serverVersion` |
+| `{SDATE}` | `serverBuildDate` | `{SBRCH}` | `serverBranch` |
+| `{CNAME}` | `clientName` | `{CIP}` | `clientIP` |
+| `{CVERS}` | `clientVersion` | `{CDATE}` | `clientBuildDate` |
+| `{CBRCH}` | `clientBranch` | `{INSRC}` | `inputSource` |
+| `{TIMES}` | `timestamp` | `{FREQ}` | `frequency` |
+| `{BIT}` | `bitrate` | `{SRIC}` | `subric` |
+| `{SRICT}` | `subricText` | `{MSG}` | `message` |
+| `{SERV}` | `service` | `{COUNT}` | `country` |
+| `{LOC}` | `location` | `{VEC}` | `vehicle` |
+| `{STAT}` | `status` | `{DIR}` | `direction` |
+| `{DIRT}` | `directionText` | `{TACI}` | `tacticalInfo` |
+
+Zwei Dinge sind anders als bei BOSWatch3: `{TIME}` ist dort der aktuelle Zeitstempel beim Ersetzen, hier der
+**Zeitpunkt des Alarms** (der Zeitstempel des Pakets). Das macht bei einer verzögerten Zustellung keinen falschen
+Wert. Und `{BR}` ist hier ein einfacher Zeilenumbruch (`\n`, bei BOSWatch3 `\r\n`).
+
+**Zeitzone:** `{TIME}` zeigt die Zeit in der Zeitzone des Containers. Ohne die Variable `TZ` (z.B. `Europe/Berlin`)
+ist das UTC, also ein bis zwei Stunden daneben.
 
 Beispiele:
 

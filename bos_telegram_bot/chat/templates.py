@@ -21,7 +21,7 @@ from bos_telegram_bot.chat.access import restricted
 from bos_telegram_bot.chat.common import get_db_path
 from bos_telegram_bot.chat.prompts import PROMPT_MARKER, ask
 from bos_telegram_bot.core.template import (MAX_TEMPLATE_LENGTH, SAMPLE_MATCHED, SAMPLE_PAYLOAD,
-                                            custom_template_problems, render, unknown_placeholders)
+                                            custom_template_problems, render, sample_payload, unknown_placeholders)
 from bos_telegram_bot.storage import database as db
 
 log = logging.getLogger(__name__)
@@ -75,7 +75,8 @@ def _sentence(problem: str) -> str:
 _HOW = ("Tippe auf den Block, um ihn zu kopieren. Füge ihn ein, ändere ihn und sende ihn als "
         "<b>Antwort auf diese Nachricht</b>. Danach siehst du eine Vorschau und bestätigst.")
 _PLACEHOLDERS = ("Platzhalter: <code>{MESSAGE}</code> Alarmtext, <code>{DESCRIPTION_LIST|RIC_LIST}</code> Name oder RIC, "
-                 "<code>{MATCHED}</code> passendes Abo, <code>{RIC}</code>. Jedes Feld des Alarms geht in Großbuchstaben.")
+                 "<code>{MATCHED}</code> passendes Abo, <code>{TIME}</code> Zeit des Alarms, <code>{BR}</code> Zeilenumbruch. "
+                 "Jedes Feld des Alarms geht in Großbuchstaben (<code>{RIC}</code>), die Kurznamen von BOSWatch auch (<code>{MSG}</code>).")
 _TAGS = ("Erlaubt: <code>&lt;b&gt;</code> <code>&lt;i&gt;</code> <code>&lt;u&gt;</code> <code>&lt;s&gt;</code> "
          "<code>&lt;code&gt;</code> <code>&lt;pre&gt;</code> <code>&lt;a href=\"…\"&gt;</code>. Zeilenumbrüche bleiben.")
 
@@ -119,7 +120,7 @@ async def _propose_reset(update, context) -> None:
     _, is_own = _effective(context, chat.id)
     if not is_own:
         return await update.message.reply_text("ℹ️ Dieser Chat nutzt bereits das Standard-Template.")
-    preview = render(context.bot_data["notification_template"], SAMPLE_PAYLOAD, SAMPLE_MATCHED)
+    preview = render(context.bot_data["notification_template"], sample_payload(), SAMPLE_MATCHED)
     token = _new_draft(context, chat.id, update.effective_user.id, None)
     await update.message.reply_text(
         f"↩️ <b>Standard-Template wiederherstellen?</b>\n\nSo sähe ein Beispiel-Alarm dann aus:\n\n{preview}",
@@ -140,7 +141,7 @@ async def _propose(update, context, text: str) -> None:
     if text == current:
         return await update.message.reply_text("ℹ️ Das ist schon das aktuelle Template, es gibt nichts zu ändern.")
 
-    body = "👁 <b>Vorschau mit einem Beispiel-Alarm</b>\n\n" + render(text, SAMPLE_PAYLOAD, SAMPLE_MATCHED)
+    body = "👁 <b>Vorschau mit einem Beispiel-Alarm</b>\n\n" + render(text, sample_payload(), SAMPLE_MATCHED)
     unknown = unknown_placeholders(text, SAMPLE_PAYLOAD)
     if unknown:
         names = ", ".join(f"<code>{{{html.escape(name, quote=False)}}}</code>" for name in unknown)

@@ -1,10 +1,14 @@
 """Vorlage für die Alarm-Nachricht. Kein Telegram, keine Datenbank.
 
-Platzhalter stehen in geschweiften Klammern und werden wie bei BOSWatch3 in
-Großbuchstaben geschrieben. Beim Suchen des Feldes im Alarm ist die Schreibweise egal
-('{SUBRICTEXT}' findet 'subricText').
+Platzhalter stehen in geschweiften Klammern und werden in Großbuchstaben geschrieben.
+Beim Suchen des Feldes im Alarm ist die Schreibweise egal ('{SUBRICTEXT}' findet 'subricText').
+Der Bot lernt keine Platzhalter: Jedes Feld, das der Alarm (das JSON von BOSWatch3) mitbringt, geht.
 
   {FELD}           Wert eines Feldes aus dem Alarm, z.B. {MESSAGE}, {RIC}
+  {KURZNAME}       die Kurznamen von BOSWatch3 gehen auch: {MSG} ({MESSAGE}), {SRICT} ({SUBRICTEXT}),
+                   {FREQ} ({FREQUENCY}) usw. Ein Feld, das genau so heißt, hat Vorrang
+  {TIME}           Zeitpunkt des Alarms, Format wie bei BOSWatch3: 14.11.2023 23:13:20
+  {BR}             Zeilenumbruch, {LPAR} und {RPAR} sind '(' und ')'. Das ist reiner Text, kein Datenfeld
   {FELD_LIST}      alle Werte eines Multicast-Alarms aus dem Feld 'feld_list', ein Wert pro
                    Zeile. Leere und doppelte Einträge entfallen. Gibt es keine Liste, gilt
                    der einzelne Wert.
@@ -23,8 +27,10 @@ Zeilen:
 Werte aus dem Alarm werden automatisch HTML-sicher gemacht. Der Text der Vorlage selbst gilt
 als Telegram-HTML und wird beim Start geprüft."""
 
+import datetime
 import html
 import re
+import time
 
 from bos_telegram_bot.core.matching import split_list
 
@@ -67,6 +73,29 @@ SAMPLE_PAYLOAD = {
     "multicastRecipientCount": "2", "multicastRecipientIndex": "1",
 }
 SAMPLE_MATCHED = ["RIC: 1000011"]
+
+
+def sample_payload(now: float = None) -> dict:
+    """Der Beispiel-Alarm mit der aktuellen Zeit, damit {TIME} in der Vorschau wie ein frischer Alarm aussieht."""
+    stamp = f"{_now() if now is None else now:.1f}"
+    return dict(SAMPLE_PAYLOAD, timestamp=stamp, timestamp_list=f"{stamp}, {stamp}")
+
+# Die Kurznamen der Wildcards von BOSWatch3 (Doku: "BOSWatch Alarmpaket Format") und das Feld im Paket, für das sie stehen.
+# Der Bot nimmt sonst die Feldnamen ({MESSAGE}), BOSWatch3 selbst die Kurznamen ({MSG}). Beides geht.
+BW3_WILDCARDS = {
+    "sname": "serverName", "svers": "serverVersion", "sdate": "serverBuildDate", "sbrch": "serverBranch",
+    "cname": "clientName", "cip": "clientIP", "cvers": "clientVersion", "cdate": "clientBuildDate",
+    "cbrch": "clientBranch", "insrc": "inputSource", "times": "timestamp", "freq": "frequency", "mode": "mode",
+    "bit": "bitrate", "ric": "ric", "sric": "subric", "srict": "subricText", "msg": "message", "tone": "tone",
+    "fms": "fms", "serv": "service", "count": "country", "loc": "location", "vec": "vehicle", "stat": "status",
+    "dir": "direction", "dirt": "directionText", "taci": "tacticalInfo",
+}
+# Die allgemeinen Wildcards von BOSWatch3 ohne Feld im Paket. Diese drei sind reiner Text und werden vor dem
+# Auswerten der Zeilen ersetzt: Sie zählen nicht als Inhalt ('{LPAR}{RIC}{RPAR}' bleibt nicht stehen, wenn die RIC fehlt).
+LITERAL_WILDCARDS = {"br": "\n", "lpar": "(", "rpar": ")"}
+_LITERAL = re.compile(r"\{(" + "|".join(LITERAL_WILDCARDS) + r")\}", re.IGNORECASE)
+# {TIME} ist der Zeitpunkt des Alarms, im Format von BOSWatch3.
+TIME_FORMAT = "%d.%m.%Y %H:%M:%S"
 
 # Platzhalter für wörtliche Klammern, solange die Zeile ausgewertet wird.
 _OPEN, _CLOSE = "\x00OPEN\x00", "\x00CLOSE\x00"
@@ -135,7 +164,8 @@ def custom_template_problems(template) -> list:
     if isinstance(template, str) and template.strip():
         if len(template) > MAX_TEMPLATE_LENGTH:
             problems.append(f"ist zu lang ({len(template)} Zeichen, erlaubt sind {MAX_TEMPLATE_LENGTH})")
-        if not PLACEHOLDER.search(template.replace("{{", "").replace("}}", "")):
+        content = [mo.group(1) for mo in PLACEHOLDER.finditer(template.replace("{{", "").replace("}}", ""))]
+        if not [name for name in content if name.lower() not in LITERAL_WILDCARDS]:
             problems.append("enthält keinen Platzhalter. Ohne z.B. {MESSAGE} oder {DESCRIPTION_LIST|RIC_LIST} "
                             "käme eine Nachricht ohne Inhalt aus dem Alarm")
     return problems
@@ -143,13 +173,15 @@ def custom_template_problems(template) -> list:
 
 def unknown_placeholders(template: str, payload: dict) -> list:
     """Platzhalter, die in keinem Feld des Alarms vorkommen und deshalb immer leer blieben (z.B. ein Tippfehler).
-    Bei 'A|B' zählt der Ausdruck nur, wenn KEINE Alternative bekannt ist. Reihenfolge wie im Text, ohne Doppelte."""
-    known = {str(key).lower() for key in payload} | {"matched"}
+    Bekannt sind auch die Kurznamen von BOSWatch3, {TIME} und {BR}/{LPAR}/{RPAR}. Bei 'A|B' zählt der Ausdruck nur,
+    wenn KEINE Alternative bekannt ist. Reihenfolge wie im Text, ohne Doppelte."""
+    known = {str(key).lower() for key in payload} | {"matched", "time"} | set(LITERAL_WILDCARDS)
     unknown = []
     for expression in dict.fromkeys(mo.group(1) for mo in PLACEHOLDER.finditer(template.replace("{{", "").replace("}}", ""))):
         def exists(name):
             key = name.lower()
-            return key in known or (key.endswith("_list") and len(key) > 5 and key[:-5] in known)
+            base = key[:-5] if key.endswith("_list") and len(key) > 5 else key
+            return key in known or base in known or BW3_WILDCARDS.get(base, "").lower() in known - {""}
         if not any(exists(name) for name in expression.split("|")):
             unknown.append(expression)
     return unknown
@@ -176,11 +208,40 @@ def _entries(fields: dict, key: str) -> list:
     return entries
 
 
+def _field_key(fields: dict, key: str) -> str:
+    """Das Feld im Alarm für einen Namen. Ein Feld, das genau so heißt, hat Vorrang. Sonst gilt der Kurzname von
+    BOSWatch3 ('msg' ist 'message'), bei Listen mit Endung ('msg_list' ist 'message_list')."""
+    if key in fields:
+        return key
+    is_list = key.endswith("_list") and len(key) > 5
+    base = key[:-5] if is_list else key
+    long_name = BW3_WILDCARDS.get(base)
+    if long_name is None:
+        return key
+    return long_name.lower() + ("_list" if is_list else "")
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _alarm_time(fields: dict) -> str:
+    """{TIME}: der Zeitpunkt des Alarms im Format von BOSWatch3, in der Zeitzone des Containers (Umgebungsvariable TZ).
+    Er kommt aus dem Zeitstempel des Pakets, bei Multicast gilt der erste. Das ist bei jeder Kopie und in jedem Chat
+    derselbe Wert und stimmt auch bei einer verzögerten Zustellung. Fehlt der Zeitstempel oder ist er unlesbar,
+    gilt die aktuelle Zeit."""
+    stamps = _entries(fields, "timestamp_list")
+    try:
+        return datetime.datetime.fromtimestamp(float(stamps[0])).strftime(TIME_FORMAT)
+    except (IndexError, ValueError, OverflowError, OSError):
+        return datetime.datetime.fromtimestamp(_now()).strftime(TIME_FORMAT)
+
+
 def _resolve(expression: str, fields: dict, matched: list):
     """('single', Text) oder ('list', Einträge) für einen Platzhalter, mit Rückfall bei 'A|B'."""
     result = ("single", "")
     for name in expression.split("|"):
-        key = name.lower()
+        key = _field_key(fields, name.lower())
         if key == "matched":
             result = ("single", ", ".join(matched))
         elif key.endswith("_list") and len(key) > 5:
@@ -238,9 +299,13 @@ def render(template: str, payload: dict, matched_aliases) -> str:
     for key, value in payload.items():
         fields.setdefault(str(key).lower(), value)
     matched = [str(alias) for alias in matched_aliases]
-
+    # Wörtliche Klammern schützen, dann {BR}, {LPAR}, {RPAR} durch ihren Text ersetzen (vor dem Aufteilen in Zeilen).
+    prepared = template.replace("{{", _OPEN).replace("}}", _CLOSE)
+    prepared = _LITERAL.sub(lambda mo: LITERAL_WILDCARDS[mo.group(1).lower()], prepared)
+    if "time" in prepared.lower():
+        fields.setdefault("time", _alarm_time(fields))        # ein Feld 'time' im Alarm hätte Vorrang
     lines = []
-    for line in template.replace("\r", "").split("\n"):
+    for line in prepared.replace("\r", "").split("\n"):
         lines.extend(_render_line(line, fields, matched))
     text = _tidy(lines)
     if not text and template != DEFAULT_TEMPLATE:

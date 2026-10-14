@@ -1,9 +1,11 @@
 """Gemeinsame Hilfen für die Tests: Fake-Bot, Fake-Updates, Beispiel-Konfiguration."""
 import asyncio
+import contextlib
 import heapq
 import itertools
 import os
 import tempfile
+import time
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 
@@ -42,6 +44,25 @@ def make_entries(extra=None, csv_rows=None):
     for entry in config["fields"]:
         entry["csv_rows"] = list(csv_rows or []) if entry.get("add") else []
     return config["fields"]
+
+
+BERLIN = "CET-1CEST,M3.5.0,M10.5.0/3"      # Europe/Berlin in POSIX-Schreibweise: geht auch ohne Zeitzonen-Datenbank
+
+
+@contextlib.contextmanager
+def time_zone(tz="UTC"):
+    """Die Zeitzone des Prozesses wie die Umgebungsvariable TZ im Container, danach wieder wie vorher."""
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = tz
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
 
 
 class Env:

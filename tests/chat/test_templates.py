@@ -1,16 +1,17 @@
 """/template: Das Alarm-Template eines Chats per Befehl ändern, mit Vorschau und Bestätigung."""
 import html
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from telegram import ForceReply
 from telegram.error import BadRequest
 
 from bos_telegram_bot.chat import prompts, templates
+from bos_telegram_bot.core import template as template_module
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE, MAX_TEMPLATE_LENGTH
 from bos_telegram_bot.storage import database as db
 from tests.chat.base import CommandTestCase
-from tests.helpers import bot_message, make_callback, make_update, sent_text
+from tests.helpers import BERLIN, bot_message, make_callback, make_update, sent_text, time_zone
 
 LOGGER = "bos_telegram_bot.chat.templates"
 GROUP = -1001234567890
@@ -254,6 +255,62 @@ class ProposeTests(TemplateTestCase):
 
     async def test_in_a_private_chat_the_preview_does_not_quote(self):
         self.assertNotIn("do_quote", (await self.propose(NEW)).call_args.kwargs)
+
+
+class WildcardTests(TemplateTestCase):
+    """{TIME}, {BR} und die Kurznamen von BOSWatch3 in einem eigenen Template."""
+
+    def setUp(self):
+        super().setUp()
+        zone = time_zone("UTC")
+        zone.__enter__()
+        self.addCleanup(zone.__exit__, None, None, None)
+
+    # Die "aktuelle Zeit" der Tests liegt einen Tag nach dem festen Zeitstempel des Beispiel-Alarms (1700000000.5), sonst
+    # ließe sich nicht unterscheiden, ob die Vorschau die aktuelle Zeit oder die alte Konstante zeigt.
+    NOW = 1700090000.0                                                         # 15.11.2023 23:13:20 UTC
+
+    async def test_the_preview_shows_the_current_time_for_time(self):
+        with patch.object(template_module, "_now", return_value=self.NOW):
+            text = sent_text(await self.propose("Zeit: {TIME}{BR}{MESSAGE}"))
+        self.assertIn("Zeit: 15.11.2023 23:13:20\nTHL 1 - Beispieltext", text)
+        self.assertNotIn("14.11.2023", text)
+
+    async def test_the_preview_follows_the_time_zone_of_the_container(self):
+        with time_zone(BERLIN), patch.object(template_module, "_now", return_value=self.NOW):
+            text = sent_text(await self.propose("{TIME}"))
+        self.assertIn("16.11.2023 00:13:20", text)
+
+    async def test_the_preview_does_not_warn_about_time_line_breaks_or_short_names(self):
+        text = sent_text(await self.propose("{TIME}{BR}{LPAR}{MSG}{RPAR} {SRICT} {FREQ} {MSG_LIST}"))
+        self.assertIn("Vorschau", text)
+        self.assertNotIn("Unbekannte", text)
+
+    async def test_a_typo_in_a_short_name_is_still_reported(self):
+        text = sent_text(await self.propose("{MSG} {MSSG} {TIEM}"))
+        self.assertIn("<code>{MSSG}</code>", text)
+        self.assertIn("<code>{TIEM}</code>", text)
+        self.assertNotIn("<code>{MSG}</code>", text.split("Unbekannte")[1])
+
+    async def test_a_template_of_only_line_breaks_is_refused_like_one_without_a_placeholder(self):
+        self.assertIn("enthält keinen Platzhalter", sent_text(await self.propose("{BR}{BR}")))
+
+    async def test_the_question_names_time_the_line_break_and_the_short_names(self):
+        text = sent_text(await self.run_template())
+        for expected in ("{TIME}", "Zeit des Alarms", "{BR}", "Zeilenumbruch", "{MSG}", "Kurznamen von BOSWatch"):
+            self.assertIn(expected, text)
+
+    async def test_the_reset_preview_shows_the_current_time_too(self):
+        db.set_chat_template(self.env.db_path, 1, NEW, 1)
+        self.env.context.bot_data["notification_template"] = "Standard {TIME}"
+        with patch.object(template_module, "_now", return_value=self.NOW):
+            text = sent_text(await self.run_template("/template standard"))
+        self.assertIn("Standard 15.11.2023 23:13:20", text)
+
+    async def test_the_confirmed_template_keeps_the_wildcards_as_typed(self):
+        reply = await self.propose("{TIME}{BR}{MSG}")
+        await self.press(f"tpl:ok:{self.token(reply)}")
+        self.assertEqual(self.stored(), "{TIME}{BR}{MSG}")                              # erst beim Alarm wird ersetzt
 
 
 class ConfirmTests(TemplateTestCase):
@@ -539,6 +596,22 @@ class EndToEndTests(TemplateTestCase):
             await SendHarness(bot, attempts=1).handle(self.env.db_path, {"ric"}, DEFAULT_TEMPLATE, self.ALARM)
         self.assertIn(1, [chat for chat, _ in bot.sent])
         self.assertIn("BOS-ALARM", dict(bot.sent)[1])
+
+
+    async def test_time_in_a_confirmed_template_is_the_time_of_the_real_alarm_in_every_chat(self):
+        reply = await self.propose("🕐 {TIME}{BR}{MSG}")
+        await self.press(f"tpl:ok:{self.token(reply)}")
+        with time_zone("UTC"):
+            texts = await self.alarm(timestamp="1700000500.5", timestamp_list="1700000500.5")
+        self.assertEqual(texts[1], "🕐 14.11.2023 22:21:40\nTEST Beispieltext")
+        self.assertIn("BOS-ALARM", texts[2])                                          # die anderen Chats bleiben beim Standard
+
+    async def test_time_of_a_delayed_alarm_is_still_the_time_of_the_alarm(self):
+        reply = await self.propose("{TIME}")
+        await self.press(f"tpl:ok:{self.token(reply)}")
+        with time_zone("UTC"), patch.object(template_module, "_now", return_value=1800000000.0):    # viel später
+            texts = await self.alarm(timestamp="1700000500.5", timestamp_list="1700000500.5")
+        self.assertEqual(texts[1], "14.11.2023 22:21:40")
 
 
 if __name__ == "__main__":
