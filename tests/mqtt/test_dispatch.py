@@ -1,7 +1,9 @@
 import asyncio
+import sqlite3
 import unittest
+from unittest.mock import patch
 
-from telegram.error import TimedOut
+from telegram.error import BadRequest, TimedOut
 
 from bos_telegram_bot.storage import database as db
 from bos_telegram_bot.core.matching import wildcard_to_regex
@@ -625,10 +627,10 @@ class QueuedDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.harness()
         real = self.h.sender.submit
 
-        def submit(chat_id, text, on_result):
+        def submit(chat_id, text, on_result, fallback=None):
             if chat_id == 22:
                 raise RuntimeError("kaputt")
-            real(chat_id, text, on_result)
+            real(chat_id, text, on_result, fallback)
 
         self.h.sender.submit = submit
         with self.assertLogs(self.ALL, level="WARNING") as logged:
@@ -656,6 +658,192 @@ class QueuedDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.h.bot.calls), 61)                           # 60 + Chat 11, jeder genau einmal
         self.assertEqual(len({c["chat_id"] for c in self.h.bot.calls}), 61)
         self.assertEqual((self.h.sender.pending, self.h.sender.queued), (0, 0))
+
+
+class RejectingBot:
+    """Telegram, das die Formatierung bestimmter Texte nicht versteht (z.B. ein kaputtes eigenes Template)."""
+
+    def __init__(self, reject_containing="KAPUTT"):
+        self.reject_containing = reject_containing
+        self.sent = []                                       # (chat_id, text) der angenommenen Nachrichten
+        self.attempts = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.attempts.append((chat_id, text))
+        if self.reject_containing in text:
+            raise BadRequest("Can't parse entities: Unsupported start tag at byte offset 3")
+        self.sent.append((chat_id, text))
+
+
+class ChatTemplateDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    """Jeder Chat bekommt den Alarm in seinem eigenen Template, wer keines hat im Standard-Template."""
+    LOGGER = "bos_telegram_bot.mqtt.dispatch"
+    ALL = "bos_telegram_bot"
+
+    def setUp(self):
+        self.env = Env(self)
+        self.memory = DeliveryMemory(300)
+        for chat in (11, 22):
+            db.add_sub(self.env.db_path, chat, "ric", "1000011", "RIC: 1000011", False)
+
+    def texts(self, bot):
+        sent = bot.sent
+        return {m["chat_id"]: m["text"] for m in sent} if sent and isinstance(sent[0], dict) else dict(sent)
+
+    async def deliver(self, payload=None, bot=None, template=DEFAULT_TEMPLATE, memory=None):
+        bot = bot or self.env.bot
+        bot.sent.clear()
+        await SendHarness(bot, attempts=1).handle(self.env.db_path, self.env.context.bot_data["active_fields"],
+                                                  template, payload or SINGLE, memory)
+        return self.texts(bot)
+
+    async def test_a_chat_with_its_own_template_gets_it_and_the_other_the_default(self):
+        db.set_chat_template(self.env.db_path, 11, "EIGEN {RIC}: {MESSAGE}", 11)
+        texts = await self.deliver()
+        self.assertEqual(texts[11], "EIGEN 1000011: TEST")
+        self.assertIn("BOS-ALARM", texts[22])
+        self.assertNotIn("EIGEN", texts[22])
+
+    async def test_every_chat_gets_its_own_template(self):
+        db.set_chat_template(self.env.db_path, 11, "A {RIC}", 11)
+        db.set_chat_template(self.env.db_path, 22, "B {RIC}", 22)
+        self.assertEqual(await self.deliver(), {11: "A 1000011", 22: "B 1000011"})
+
+    async def test_the_matched_name_is_the_one_of_that_chat(self):
+        db.add_sub(self.env.db_path, 22, "message", "TEST", "Stichwort TEST", False)
+        for chat in (11, 22):
+            db.set_chat_template(self.env.db_path, chat, "{MATCHED}", chat)
+        texts = await self.deliver()
+        self.assertEqual(texts[11], "RIC: 1000011")
+        self.assertEqual(texts[22], "RIC: 1000011, Stichwort TEST")
+
+    async def test_the_template_of_a_group_works_with_its_negative_id(self):
+        db.add_sub(self.env.db_path, -1001234567890, "ric", "1000011", "RIC: 1000011", False)
+        db.set_chat_template(self.env.db_path, -1001234567890, "GRUPPE {RIC}", 1)
+        self.assertEqual((await self.deliver())[-1001234567890], "GRUPPE 1000011")
+
+    async def test_the_template_of_a_chat_without_a_matching_subscription_is_never_used(self):
+        db.set_chat_template(self.env.db_path, 99, "FREMD {RIC}", 99)
+        texts = await self.deliver()
+        self.assertEqual(sorted(texts), [11, 22])
+
+    async def test_the_default_template_comes_from_the_argument(self):
+        texts = await self.deliver(template="STANDARD {RIC}")
+        self.assertEqual(texts, {11: "STANDARD 1000011", 22: "STANDARD 1000011"})
+
+    async def test_multicast_lists_work_in_an_own_template(self):
+        db.set_chat_template(self.env.db_path, 11, "• {DESCRIPTION_LIST}", 11)
+        payload = dict(SINGLE, description_list="Wache Nord, Fahrzeug 1", ric_list="1000011, 1000043")
+        self.assertEqual((await self.deliver(payload))[11], "• Wache Nord\n• Fahrzeug 1")
+
+    async def test_values_of_the_alarm_are_still_made_html_safe_in_an_own_template(self):
+        db.set_chat_template(self.env.db_path, 11, "<b>{MESSAGE}</b>", 11)
+        payload = dict(SINGLE, message="<script>x</script> & Co")
+        self.assertEqual((await self.deliver(payload))[11], "<b>&lt;script&gt;x&lt;/script&gt; &amp; Co</b>")
+
+    async def test_the_fallback_goes_with_the_message_only_when_there_is_an_own_template(self):
+        db.set_chat_template(self.env.db_path, 11, "EIGEN {RIC}", 11)
+        harness = SendHarness(self.env.bot, attempts=1)
+        seen = {}
+        real = harness.sender.submit
+
+        def spy(chat_id, text, on_result, fallback=None):
+            seen[chat_id] = (text, fallback)
+            real(chat_id, text, on_result, fallback)
+
+        harness.sender.submit = spy
+        await harness.handle(self.env.db_path, {"ric"}, DEFAULT_TEMPLATE, SINGLE)
+        self.assertEqual(seen[11][0], "EIGEN 1000011")
+        self.assertIn("BOS-ALARM", seen[11][1])                                         # Rückfall: der Standardtext
+        self.assertIsNone(seen[22][1])                                                   # ohne eigenes Template kein Rückfall
+
+    async def test_an_own_template_that_gives_the_same_text_as_the_default_needs_no_fallback(self):
+        db.set_chat_template(self.env.db_path, 11, DEFAULT_TEMPLATE, 11)
+        harness = SendHarness(self.env.bot, attempts=1)
+        seen = {}
+        real = harness.sender.submit
+        harness.sender.submit = lambda chat_id, text, on_result, fallback=None: (seen.update({chat_id: fallback}),
+                                                                                   real(chat_id, text, on_result, fallback))
+        await harness.handle(self.env.db_path, {"ric"}, DEFAULT_TEMPLATE, SINGLE)
+        self.assertIsNone(seen[11])
+
+    async def test_when_telegram_rejects_an_own_template_the_alarm_still_arrives_in_the_default(self):
+        db.set_chat_template(self.env.db_path, 11, "KAPUTT <b>{RIC}", 11)
+        bot = RejectingBot()
+        with self.assertLogs(self.ALL, level="INFO") as logged:
+            texts = await self.deliver(bot=bot)
+        self.assertEqual(sorted(texts), [11, 22])
+        self.assertIn("BOS-ALARM", texts[11])                                             # der Standardtext
+        self.assertTrue(any("Telegram lehnt die Formatierung des eigenen Templates ab" in l for l in logged.output))
+        self.assertTrue(any("gesendet 2/2" in l and l.startswith("INFO:") for l in logged.output))
+
+    async def test_such_an_alarm_counts_as_delivered_for_the_duplicate_memory(self):
+        db.set_chat_template(self.env.db_path, 11, "KAPUTT {RIC}", 11)
+        with self.assertLogs(self.ALL, level="WARNING"):
+            await self.deliver(bot=RejectingBot(), memory=self.memory)
+        self.assertTrue(self.memory.is_delivered("1700000500.5", 11))
+        self.assertEqual(await self.deliver(bot=RejectingBot(), memory=self.memory), {})   # eine Kopie schickt nichts mehr
+
+    async def test_a_template_that_cannot_be_applied_gives_the_default_and_a_warning(self):
+        db.set_chat_template(self.env.db_path, 11, "EIGEN {RIC}", 11)
+        real = dispatch.build_notification_text
+
+        def sometimes_broken(payload, template, aliases):
+            if template == "EIGEN {RIC}":
+                raise ValueError("kaputt")
+            return real(payload, template, aliases)
+
+        with patch.object(dispatch, "build_notification_text", sometimes_broken), \
+                self.assertLogs(self.LOGGER, level="WARNING") as logged:
+            texts = await self.deliver()
+        self.assertIn("BOS-ALARM", texts[11])
+        self.assertIn("Chat 11: Das eigene Template lässt sich nicht anwenden, es gilt der Standard (ValueError: kaputt)",
+                      logged.output[0])
+
+    async def test_when_the_templates_cannot_be_read_everybody_gets_the_default_and_a_warning(self):
+        db.set_chat_template(self.env.db_path, 11, "EIGEN {RIC}", 11)
+        with patch.object(dispatch.db, "get_chat_templates", side_effect=sqlite3.OperationalError("no such table")), \
+                self.assertLogs(self.LOGGER, level="WARNING") as logged:
+            texts = await self.deliver()
+        self.assertEqual(sorted(texts), [11, 22])
+        self.assertTrue(all("BOS-ALARM" in text for text in texts.values()))
+        self.assertIn("Eigene Templates konnten nicht gelesen werden, es gilt überall der Standard "
+                      "(OperationalError: no such table)", logged.output[0])
+
+    async def test_a_failure_while_reading_the_subscriptions_is_still_an_error_not_hidden(self):
+        with patch.object(dispatch.db, "get_all_subs", side_effect=sqlite3.OperationalError("gesperrt")):
+            with self.assertRaises(sqlite3.OperationalError):
+                await self.deliver()
+
+    async def test_a_template_that_renders_to_nothing_gives_the_default(self):
+        db.set_chat_template(self.env.db_path, 11, "{GIBTSNICHT}", 11)
+        self.assertIn("BOS-ALARM", (await self.deliver())[11])
+
+    async def test_the_copy_of_an_alarm_does_not_send_the_own_template_again(self):
+        db.set_chat_template(self.env.db_path, 11, "EIGEN {RIC}", 11)
+        first = await self.deliver(memory=self.memory)
+        again = await self.deliver(dict(SINGLE, republished=True), memory=self.memory)
+        self.assertEqual(first[11], "EIGEN 1000011")
+        self.assertEqual(again, {})
+
+    async def test_debug_names_the_chats_with_an_own_template(self):
+        db.set_chat_template(self.env.db_path, 11, "EIGEN {RIC}", 11)
+        with self.assertLogs(self.LOGGER, level="DEBUG") as logged:
+            await self.deliver()
+        self.assertIn("Chat 11: eigenes Template", "\n".join(logged.output))
+        self.assertNotIn("Chat 22: eigenes Template", "\n".join(logged.output))
+
+    async def test_a_changed_template_applies_to_the_very_next_alarm(self):
+        db.set_chat_template(self.env.db_path, 11, "ALT {RIC}", 11)
+        first = await self.deliver()
+        db.set_chat_template(self.env.db_path, 11, "NEU {RIC}", 11)
+        second = await self.deliver(dict(SINGLE, timestamp="1700000999.9", timestamp_list="1700000999.9"))
+        self.assertEqual((first[11], second[11]), ("ALT 1000011", "NEU 1000011"))
+
+    async def test_deleting_the_template_goes_back_to_the_default_for_the_next_alarm(self):
+        db.set_chat_template(self.env.db_path, 11, "EIGEN {RIC}", 11)
+        db.delete_chat_template(self.env.db_path, 11)
+        self.assertIn("BOS-ALARM", (await self.deliver())[11])
 
 
 if __name__ == "__main__":

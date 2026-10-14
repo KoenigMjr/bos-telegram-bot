@@ -55,14 +55,14 @@ class StartupTests(WiringTestCase):
         handlers_ = app.handlers[0]
         commands = sorted(c for h in handlers_ if isinstance(h, CommandHandler) for c in h.commands)
         self.assertEqual(commands, sorted(["abo", "adduser", "description", "lastraw", "message", "ric",
-                                           "stadtteil", "start", "subrictext", "users"]))
+                                           "stadtteil", "start", "subrictext", "template", "users"]))
         self.assertTrue(any(isinstance(h, CallbackQueryHandler) for h in handlers_))
         self.assertTrue(any(isinstance(h, MessageHandler) for h in handlers_))
 
     def test_every_question_knows_its_command(self):
         app = self.start()
         self.assertEqual(sorted(app.bot_data["prompt_handlers"]),
-                         [("add", "ric"), ("adduser", ""), ("for", "message"), ("for", "ric"), ("for", "subricText")])
+                         [("add", "ric"), ("adduser", ""), ("for", "message"), ("for", "ric"), ("for", "subricText"), ("template", "")])
 
     def test_csv_is_detected_in_data_folder_and_loaded(self):
         with open("data/descriptions_ric.csv", "w", encoding="utf-8") as f:
@@ -543,6 +543,69 @@ class ShutdownTests(AsyncWiringTestCase):
         await bot_app.post_stop(app)
 
 
+class TemplateWiringTests(WiringTestCase):
+    """Der Befehl /template und seine Knöpfe sind richtig eingehängt."""
+
+    @staticmethod
+    def click(data):
+        from telegram import CallbackQuery, Update, User
+        query = CallbackQuery(id="1", from_user=User(id=1, first_name="T", is_bot=False), chat_instance="x", data=data)
+        return Update(update_id=1, callback_query=query)
+
+    def first_handler_for(self, app, data):
+        """Welcher Handler nimmt den Klick an? In PTB entscheidet der erste passende einer Gruppe."""
+        update = self.click(data)
+        return next(h for h in app.handlers[0] if isinstance(h, CallbackQueryHandler) and h.check_update(update))
+
+    def test_the_template_buttons_go_to_the_template_handler(self):
+        from bos_telegram_bot.chat import templates
+        app = self.start()
+        for data in ("tpl:ok:abcd1234", "tpl:no:abcd1234", "tpl:again:abcd1234"):
+            self.assertIs(self.first_handler_for(app, data).callback, templates.template_buttons, data)
+
+    def test_all_the_old_buttons_still_go_to_the_old_handler(self):
+        from bos_telegram_bot.chat import buttons
+        app = self.start()
+        for data in ("del:5", "cancel:ric", "close_menu", "page:ric:1", "add:ric:0", "pat:ric", "acc:ok:77", "usr:del:77"):
+            self.assertIs(self.first_handler_for(app, data).callback, buttons.button_handler, data)
+
+    def test_the_template_handler_comes_before_the_catch_all_handler(self):
+        callbacks = [h for h in self.start().handlers[0] if isinstance(h, CallbackQueryHandler)]
+        self.assertEqual(len(callbacks), 2)
+        self.assertIsNotNone(callbacks[0].pattern)
+        self.assertIsNone(callbacks[1].pattern)
+
+    def test_the_template_command_is_registered(self):
+        from bos_telegram_bot.chat import templates
+        handler = next(h for h in self.start().handlers[0] if isinstance(h, CommandHandler) and "template" in h.commands)
+        self.assertIs(handler.callback, templates.template_command)
+
+    def test_the_answer_to_the_question_reaches_the_template_handler(self):
+        from bos_telegram_bot.chat import templates
+        app = self.start()
+        self.assertIs(app.bot_data["prompt_handlers"][templates.HANDLER_KEY], templates.template_reply)
+
+    def test_the_command_is_in_the_menu_with_a_description(self):
+        menu = {c.command: c.description for c in bot_app.build_menu([])}
+        self.assertEqual(menu["template"], "Alarm-Nachricht anpassen")
+
+    def test_the_command_is_in_the_menu_for_everybody_and_not_only_for_admins(self):
+        self.assertIn("template", [c.command for c in bot_app.build_menu([])])
+
+    def test_the_default_template_for_the_command_comes_from_the_config(self):
+        with open("data/config.yaml", "w", encoding="utf-8") as f:
+            f.write("notification:\n  template: |\n    EIGENER STANDARD {MESSAGE}\n")
+        self.assertEqual(self.start().bot_data["notification_template"].strip(), "EIGENER STANDARD {MESSAGE}")
+
+    def test_the_template_table_exists_after_the_start(self):
+        import sqlite3
+        self.start()
+        conn = sqlite3.connect("data/bot_db.sqlite3")
+        self.addCleanup(conn.close)
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        self.assertIn("chat_templates", tables)
+
+
 class StartupErrorTests(WiringTestCase):
     def test_missing_token(self):
         with patch.dict(os.environ, {"ADMIN_USERS": "1"}, clear=True), self.assertRaises(SystemExit) as ctx:
@@ -604,7 +667,7 @@ class MenuTests(unittest.TestCase):
         entries = make_entries()
         menu = bot_app.build_menu(cfg.build_command_map(entries))
         names = [c.command for c in menu]
-        self.assertEqual(names, ["start", "abo", "lastraw", "ric", "description", "message", "subrictext"])
+        self.assertEqual(names, ["start", "abo", "lastraw", "template", "ric", "description", "message", "subrictext"])
         self.assertTrue(all(1 <= len(c.description) <= 256 for c in menu))
         self.assertIn("Fahrzeug / Wache suchen", [c.description for c in menu])
 

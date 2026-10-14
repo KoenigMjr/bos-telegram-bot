@@ -9,7 +9,7 @@ from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandle
 
 from bos_telegram_bot import config as cfg
 from bos_telegram_bot import logs
-from bos_telegram_bot.chat import admin, buttons, fields, overview, prompts
+from bos_telegram_bot.chat import admin, buttons, fields, overview, prompts, templates
 from bos_telegram_bot.chat.sender import SHUTDOWN_SECONDS, Sender
 from bos_telegram_bot.core.delivery import DeliveryMemory
 from bos_telegram_bot.mqtt.listener import start_mqtt_listener
@@ -33,6 +33,7 @@ def build_menu(command_map: list) -> list:
         BotCommand("start", "Hilfe & Übersicht"),
         BotCommand("abo", "Abonnements anzeigen/verwalten"),
         BotCommand("lastraw", "Letztes Alarm-JSON anzeigen"),
+        BotCommand("template", "Alarm-Nachricht anpassen"),
     ]
     for cmd in command_map:
         entry = cmd["entry"]
@@ -156,11 +157,14 @@ def main():
     app.add_handler(CommandHandler("lastraw", overview.lastraw_handler))
     app.add_handler(CommandHandler("users", admin.users_handler))
     app.add_handler(CommandHandler("adduser", admin.adduser_handler))
+    app.add_handler(CommandHandler("template", templates.template_command))
+    # Die Knöpfe des Templates zuerst: Der allgemeine Handler darunter nimmt sonst jeden Klick an.
+    app.add_handler(CallbackQueryHandler(templates.template_buttons, pattern=r"^tpl:"))
     app.add_handler(CallbackQueryHandler(buttons.button_handler))
 
     # Befehle mit Eingabe fragen bei fehlender Eingabe nach (ForceReply). Damit die Antwort
     # den richtigen Befehl ausführt, merkt sich der Bot zu jeder Rückfrage dessen Handler.
-    prompt_handlers = {("adduser", ""): admin.adduser_handler}
+    prompt_handlers = {("adduser", ""): admin.adduser_handler, templates.HANDLER_KEY: templates.template_reply}
     for cmd in command_map:
         make = fields.make_for_handler if cmd["kind"] == "for" else fields.make_add_handler
         handler = make(cmd["entry"])

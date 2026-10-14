@@ -10,7 +10,7 @@ class OverviewTests(CommandTestCase):
         update, reply = make_update()
         await overview.start_handler(update, self.env.context)
         text = sent_text(reply)
-        for command in ("/ric", "/description", "/message", "/subrictext", "/abo", "/lastraw"):
+        for command in ("/ric", "/description", "/message", "/subrictext", "/abo", "/lastraw", "/template"):
             self.assertIn(command, text)
 
     async def test_start_in_group_mentions_shared_subscriptions(self):

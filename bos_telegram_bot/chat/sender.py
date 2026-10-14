@@ -13,6 +13,9 @@ zugestellt. Dabei gilt:
   - Dauerhafte Fehler (der Bot wurde aus der Gruppe entfernt, ungültige Nachricht) werden nicht wiederholt.
   - Die Warteschlange ist begrenzt. Ist sie voll, fällt die älteste wartende Nachricht heraus.
 
+  - Eigene Templates pro Chat sind Telegram-HTML. Lehnt Telegram eine Nachricht wegen ihrer Formatierung ab, geht der
+    Alarm mit dem Text des Standard-Templates raus (fallback), statt verloren zu gehen. Das zählt nicht als Versuch.
+
 Jede Nachricht meldet ihr Ergebnis genau einmal an die Funktion on_result(chat_id, angenommen, grund)."""
 
 import asyncio
@@ -33,6 +36,13 @@ SHUTDOWN_SECONDS = 10.0
 # Diese Fehler ändern sich durch Wiederholen nicht. BadRequest ist in der Bibliothek eine Unterklasse von
 # NetworkError, deshalb muss es VOR den wiederholbaren Fehlern geprüft werden.
 _PERMANENT = (Forbidden, BadRequest, ChatMigrated, InvalidToken)
+
+# So meldet Telegram, dass es die Formatierung (HTML) einer Nachricht nicht versteht oder nichts zu senden bleibt.
+_FORMAT_ERRORS = ("can't parse entities", "message text is empty")
+
+
+def _rejects_formatting(error) -> bool:
+    return isinstance(error, BadRequest) and any(part in str(error).lower() for part in _FORMAT_ERRORS)
 
 
 def _describe(error) -> str:
@@ -56,10 +66,11 @@ def _hint(error) -> str:
 
 
 class _Item:
-    __slots__ = ("seq", "chat_id", "text", "on_result", "enqueued", "finished")
+    __slots__ = ("seq", "chat_id", "text", "fallback", "on_result", "enqueued", "finished")
 
-    def __init__(self, seq, chat_id, text, on_result, enqueued):
+    def __init__(self, seq, chat_id, text, on_result, enqueued, fallback=None):
         self.seq, self.chat_id, self.text, self.on_result, self.enqueued = seq, chat_id, text, on_result, enqueued
+        self.fallback = fallback
         self.finished = False
 
 
@@ -106,9 +117,10 @@ class Sender:
         """Nachrichten, die noch auf ihren Versand warten."""
         return sum(len(q) for q in self._queues.values())
 
-    def submit(self, chat_id, text, on_result) -> None:
-        """Reiht eine Nachricht ein. on_result(chat_id, angenommen, grund) wird genau einmal aufgerufen."""
-        item = _Item(next(self._seq), chat_id, text, on_result, self.clock())
+    def submit(self, chat_id, text, on_result, fallback=None) -> None:
+        """Reiht eine Nachricht ein. on_result(chat_id, angenommen, grund) wird genau einmal aufgerufen.
+        fallback: Der Text, der stattdessen gesendet wird, falls Telegram die Formatierung von text ablehnt."""
+        item = _Item(next(self._seq), chat_id, text, on_result, self.clock(), fallback)
         self._outstanding += 1
         if self._closed:
             self._finish(item, False, "Versand ist beendet")
@@ -180,7 +192,9 @@ class Sender:
 
     async def _deliver(self, item) -> None:
         first_try = None
-        for attempt in range(1, self.attempts + 1):
+        attempt = 0
+        while attempt < self.attempts:
+            attempt += 1
             await self._wait_turn(item.chat_id)
             started = self.clock()
             if first_try is None:
@@ -191,6 +205,12 @@ class Sender:
                 raise
             except Exception as error:
                 problem = _describe(error)
+                if item.fallback and _rejects_formatting(error):
+                    log.warning("Chat %s: Telegram lehnt die Formatierung des eigenen Templates ab (%s). "
+                                "Der Alarm geht mit dem Standard-Template raus", item.chat_id, problem)
+                    item.text, item.fallback = item.fallback, None
+                    attempt -= 1                                  # zählt nicht als Versuch, gleich noch einmal
+                    continue
                 if isinstance(error, _PERMANENT):
                     log.error("Senden an Chat %s nicht möglich (%s). %s", item.chat_id, problem, _hint(error))
                     self._finish(item, False, problem)

@@ -1,12 +1,13 @@
 import unittest
 from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock
 
 from telegram import ForceReply
 
 from bos_telegram_bot.chat import admin, fields, overview, prompts
 from bos_telegram_bot.storage import database as db
 from tests.chat.base import CommandTestCase, reply_buttons
-from tests.helpers import bot_message, make_update, sent_text
+from tests.helpers import bot_message, make_callback, make_update, sent_text
 
 
 class PromptTests(CommandTestCase):
@@ -189,6 +190,43 @@ class PromptTests(CommandTestCase):
         update, reply = make_update()
         await overview.start_handler(update, self.env.context)
         self.assertIn("fragt dich danach", sent_text(reply))
+
+
+class AskOnAnotherMessageTests(CommandTestCase):
+    """Nach einem Knopfdruck gibt es keine update.message: Die Rückfrage hängt dann an einer angegebenen Nachricht."""
+
+    async def test_the_question_is_sent_as_a_reply_to_the_given_message(self):
+        anchor = NS(reply_text=AsyncMock(return_value=NS(message_id=42)))
+        update, query = make_callback("x", 1)                                   # kein update.message, wie bei einem Klick
+        await prompts.ask(update, self.env.context, "✍️ Frage", "Antwort", ("test", ""), message=anchor)
+        anchor.reply_text.assert_awaited_once()
+        self.assertEqual(anchor.reply_text.call_args[0][0], "✍️ Frage")
+        self.assertIsInstance(anchor.reply_text.call_args.kwargs["reply_markup"], ForceReply)
+
+    async def test_the_question_is_remembered_for_the_person_who_clicked(self):
+        anchor = NS(reply_text=AsyncMock(return_value=NS(message_id=43)))
+        update, _ = make_callback("x", 1)
+        await prompts.ask(update, self.env.context, "✍️ Frage", "Antwort", ("test", ""), message=anchor)
+        self.assertEqual(self.env.context.user_data["prompts"][(1, 43)], {"handler": ("test", "")})
+
+    async def test_without_the_parameter_it_still_answers_the_command_message(self):
+        update, reply = make_update(1)
+        await prompts.ask(update, self.env.context, "✍️ Frage", "Antwort", ("test", ""))
+        reply.assert_awaited_once()
+
+    async def test_in_a_group_the_question_quotes_the_given_message_and_is_selective(self):
+        anchor = NS(reply_text=AsyncMock(return_value=NS(message_id=44)))
+        update, _ = make_callback("x", 1, chat_id=-100, chat_type="supergroup")
+        await prompts.ask(update, self.env.context, "✍️ Frage", "Antwort", ("test", ""), message=anchor)
+        kwargs = anchor.reply_text.call_args.kwargs
+        self.assertTrue(kwargs["do_quote"])
+        self.assertTrue(kwargs["reply_markup"].selective)
+
+    async def test_the_placeholder_is_cut_to_what_telegram_allows(self):
+        anchor = NS(reply_text=AsyncMock(return_value=NS(message_id=45)))
+        update, _ = make_callback("x", 1)
+        await prompts.ask(update, self.env.context, "✍️ Frage", "x" * 200, ("test", ""), message=anchor)
+        self.assertEqual(len(anchor.reply_text.call_args.kwargs["reply_markup"].input_field_placeholder), 64)
 
 
 if __name__ == "__main__":

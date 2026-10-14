@@ -94,6 +94,91 @@ class RequestChatTests(unittest.TestCase):
         self.assertEqual([u["user_id"] for u in db.list_users(self.path, "allowed")], [1, 2])
 
 
+class ChatTemplateTests(unittest.TestCase):
+    """Eigene Alarm-Templates je Chat (Befehl /template)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = os.path.join(tmp.name, "bot.sqlite3")
+        db.init_db(self.path)
+
+    def test_a_chat_without_its_own_template_has_none(self):
+        self.assertIsNone(db.get_chat_template(self.path, 123))
+        self.assertEqual(db.get_chat_templates(self.path), {})
+
+    def test_a_template_is_stored_and_read_back_unchanged(self):
+        template = "🚨 <b>{MESSAGE}</b>\n\n{DESCRIPTION_LIST|RIC_LIST}  \n<i>{MATCHED}</i>"
+        db.set_chat_template(self.path, 123, template, 5)
+        self.assertEqual(db.get_chat_template(self.path, 123), template)             # Umbrüche und Leerzeichen bleiben
+
+    def test_setting_again_replaces_the_template(self):
+        db.set_chat_template(self.path, 123, "{MESSAGE}", 5)
+        db.set_chat_template(self.path, 123, "{RIC}", 6)
+        self.assertEqual(db.get_chat_template(self.path, 123), "{RIC}")
+        self.assertEqual(len(db.get_chat_templates(self.path)), 1)
+
+    def test_the_last_editor_is_remembered(self):
+        import sqlite3
+        db.set_chat_template(self.path, 123, "{MESSAGE}", 5)
+        db.set_chat_template(self.path, 123, "{RIC}", 6)
+        conn = sqlite3.connect(self.path)
+        self.addCleanup(conn.close)
+        self.assertEqual(conn.execute("SELECT updated_by FROM chat_templates WHERE chat_id = 123").fetchone(), (6,))
+
+    def test_the_editor_may_be_unknown(self):
+        db.set_chat_template(self.path, 123, "{MESSAGE}")
+        self.assertEqual(db.get_chat_template(self.path, 123), "{MESSAGE}")
+
+    def test_private_chats_and_groups_are_separate_entries(self):
+        db.set_chat_template(self.path, 5, "{MESSAGE}", 5)
+        db.set_chat_template(self.path, -1001234567890, "{RIC}", 5)
+        self.assertEqual(db.get_chat_templates(self.path), {5: "{MESSAGE}", -1001234567890: "{RIC}"})
+
+    def test_deleting_returns_whether_there_was_one(self):
+        db.set_chat_template(self.path, 123, "{MESSAGE}", 5)
+        self.assertTrue(db.delete_chat_template(self.path, 123))
+        self.assertFalse(db.delete_chat_template(self.path, 123))
+        self.assertIsNone(db.get_chat_template(self.path, 123))
+
+    def test_deleting_leaves_other_chats_alone(self):
+        db.set_chat_template(self.path, 1, "{MESSAGE}", 1)
+        db.set_chat_template(self.path, 2, "{RIC}", 1)
+        db.delete_chat_template(self.path, 1)
+        self.assertEqual(db.get_chat_templates(self.path), {2: "{RIC}"})
+
+    def test_quotes_and_special_characters_survive(self):
+        template = "<a href=\"https://example.org/?a=1&b=2\">{MESSAGE}</a> 'x' \"y\" ä ö ü ß 🚨"
+        db.set_chat_template(self.path, 1, template, 1)
+        self.assertEqual(db.get_chat_template(self.path, 1), template)
+
+    def test_templates_do_not_touch_subscriptions_or_users(self):
+        db.add_sub(self.path, 1, "ric", "1000011", "RIC: 1000011", False)
+        db.set_user_status(self.path, 1, "allowed", "A")
+        db.set_chat_template(self.path, 1, "{MESSAGE}", 1)
+        db.delete_chat_template(self.path, 1)
+        self.assertEqual(len(db.get_all_subs(self.path)), 1)
+        self.assertEqual(db.get_user_status(self.path, 1), "allowed")
+
+    def test_an_old_database_without_the_table_gets_it_at_start_and_keeps_its_data(self):
+        import sqlite3
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        old = os.path.join(tmp.name, "alt.sqlite3")
+        conn = sqlite3.connect(old)
+        conn.execute("CREATE TABLE users (user_id INTEGER PRIMARY KEY, status TEXT NOT NULL, name TEXT, "
+                     "updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        conn.execute("INSERT INTO users (user_id, status) VALUES (5, 'allowed')")
+        conn.commit()
+        conn.close()
+        db.init_db(old)
+        db.init_db(old)                                                              # zweimal: wiederholbar
+        self.assertEqual(db.get_chat_templates(old), {})
+        self.assertEqual(db.get_user_status(old, 5), "allowed")
+        db.set_chat_template(old, 5, "{MESSAGE}", 5)
+        self.assertEqual(db.get_chat_template(old, 5), "{MESSAGE}")
+
+
 class UserTableMigrationTests(unittest.TestCase):
     """Datenbanken aus früheren Versionen kennen die neue Spalte nicht. Sie werden beim Start ergänzt."""
 

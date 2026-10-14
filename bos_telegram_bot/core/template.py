@@ -45,6 +45,29 @@ ALLOWED_TAGS = {"b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "cod
 _TAG = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9-]*)([^<>]*)>")
 _BAD_AMPERSAND = re.compile(r"&(?!(?:amp|lt|gt|quot|#\d+|#x[0-9a-fA-F]+);)")
 
+# Eigene Templates pro Chat (Befehl /template): so lang darf der Text höchstens sein. Telegram erlaubt 4096 Zeichen
+# je Nachricht, der Alarm selbst braucht auch Platz.
+MAX_TEMPLATE_LENGTH = 1500
+
+# Ein erfundener Beispiel-Alarm für die Vorschau. Er enthält die üblichen Felder von BOSWatch3 (auch die
+# Multicast-Listen), damit sich fast jede Vorlage darauf ausprobieren lässt. Echte Alarme gehören nicht in
+# eine Vorschau: Sie könnten eine Wache betreffen, die der Chat gar nicht abonniert hat.
+SAMPLE_PAYLOAD = {
+    "timestamp": "1700000000.5", "mode": "pocsag", "bitrate": "1200",
+    "ric": "1000011", "subric": "1", "subricText": "a",
+    "message": "THL 1 - Beispieltext, bitte nicht ernst nehmen",
+    "description": "Wache Nord (Beispiel)",
+    "clientName": "Beispiel-Client", "clientVersion": "3.0.0", "clientBranch": "develop", "inputSource": "sdr",
+    "frequency": "123.450M", "clientIP": "192.0.2.10",
+    "serverName": "Beispiel-Server", "serverVersion": "3.0.0", "serverBranch": "develop",
+    "ric_list": "1000011, 1000043", "description_list": "Wache Nord (Beispiel), Fahrzeug 1 (Beispiel)",
+    "message_list": ", ", "timestamp_list": "1700000000.5, 1700000000.8", "mode_list": "pocsag, pocsag",
+    "subric_list": "1, 1", "subricText_list": "a, a", "bitrate_list": "1200, 1200",
+    "multicastMode": "complete", "multicastRole": "recipient", "multicastSourceRic": "1000099",
+    "multicastRecipientCount": "2", "multicastRecipientIndex": "1",
+}
+SAMPLE_MATCHED = ["RIC: 1000011"]
+
 # Platzhalter für wörtliche Klammern, solange die Zeile ausgewertet wird.
 _OPEN, _CLOSE = "\x00OPEN\x00", "\x00CLOSE\x00"
 
@@ -101,6 +124,35 @@ def validate_template(template) -> list:
             problems.append(f"Die Klammer '{brace}' steht außerhalb eines Platzhalters. "
                             f"Ein Platzhalter sieht so aus: {{MESSAGE}}, eine wörtliche Klammer wird doppelt geschrieben")
     return problems + html_problems(static)
+
+
+def custom_template_problems(template) -> list:
+    """Probleme eines Templates, das ein User per Befehl setzen will. Leere Liste, wenn es in Ordnung ist.
+
+    Zusätzlich zur Prüfung beim Start (validate_template) gilt: nicht zu lang, und mindestens ein Platzhalter,
+    sonst käme eine Nachricht ohne jeden Inhalt aus dem Alarm."""
+    problems = validate_template(template)
+    if isinstance(template, str) and template.strip():
+        if len(template) > MAX_TEMPLATE_LENGTH:
+            problems.append(f"ist zu lang ({len(template)} Zeichen, erlaubt sind {MAX_TEMPLATE_LENGTH})")
+        if not PLACEHOLDER.search(template.replace("{{", "").replace("}}", "")):
+            problems.append("enthält keinen Platzhalter. Ohne z.B. {MESSAGE} oder {DESCRIPTION_LIST|RIC_LIST} "
+                            "käme eine Nachricht ohne Inhalt aus dem Alarm")
+    return problems
+
+
+def unknown_placeholders(template: str, payload: dict) -> list:
+    """Platzhalter, die in keinem Feld des Alarms vorkommen und deshalb immer leer blieben (z.B. ein Tippfehler).
+    Bei 'A|B' zählt der Ausdruck nur, wenn KEINE Alternative bekannt ist. Reihenfolge wie im Text, ohne Doppelte."""
+    known = {str(key).lower() for key in payload} | {"matched"}
+    unknown = []
+    for expression in dict.fromkeys(mo.group(1) for mo in PLACEHOLDER.finditer(template.replace("{{", "").replace("}}", ""))):
+        def exists(name):
+            key = name.lower()
+            return key in known or (key.endswith("_list") and len(key) > 5 and key[:-5] in known)
+        if not any(exists(name) for name in expression.split("|")):
+            unknown.append(expression)
+    return unknown
 
 
 # ---------------------------------------------------------------- Ausgabe

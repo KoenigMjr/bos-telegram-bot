@@ -423,6 +423,17 @@ class CommandMapTests(ConfigTestCase):
             cfg.build_command_map(config["fields"])
         return str(ctx.exception)
 
+    def test_every_builtin_command_is_reserved_including_template(self):
+        for name in ("start", "abo", "lastraw", "users", "adduser", "template"):
+            self.assertIn(name, cfg.RESERVED_COMMANDS)
+            message = self._collision(f"fields:\n  - for: {name}\n")
+            self.assertIn("Befehlsname-Kollision", message, name)
+            self.assertIn("einen eingebauten Befehl", message, name)
+
+    def test_a_field_called_template_gets_another_command_name_instead_of_hiding_the_builtin(self):
+        config = self.load("fields:\n  - for: template\n    command: vorlage\n")
+        self.assertIn("vorlage", [c["name"] for c in cfg.build_command_map(config["fields"])])
+
     def test_collision_between_fields(self):
         message = self._collision("fields:\n  - for: Ric2\n    command: ric\n")
         self.assertIn("/ric", message)

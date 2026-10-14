@@ -25,7 +25,7 @@ BUNDLED_CONFIG = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__
 DATA_DIR = "data"
 OPTIONAL_CONFIG_PATH = os.path.join(DATA_DIR, "config.yaml")
 
-RESERVED_COMMANDS = {"start", "abo", "lastraw", "users", "adduser"}
+RESERVED_COMMANDS = {"start", "abo", "lastraw", "users", "adduser", "template"}
 MATCH_MODES = ("exact", "contains")
 
 

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 from bos_telegram_bot.storage import database as db
 from bos_telegram_bot.chat import admin as chat_admin
 from bos_telegram_bot.chat import fields as chat_fields
+from bos_telegram_bot.chat import templates as chat_templates
 from bos_telegram_bot import config as cfg
 from bos_telegram_bot.core.template import DEFAULT_TEMPLATE
 
@@ -77,7 +78,7 @@ class Env:
     @staticmethod
     def _prompt_handlers(entries):
         """Wie in app.main(): welcher Befehl gehört zu welcher Rückfrage."""
-        result = {("adduser", ""): chat_admin.adduser_handler}
+        result = {("adduser", ""): chat_admin.adduser_handler, chat_templates.HANDLER_KEY: chat_templates.template_reply}
         for cmd in cfg.build_command_map(entries):
             make = chat_fields.make_for_handler if cmd["kind"] == "for" else chat_fields.make_add_handler
             result[(cmd["kind"], cmd["entry"]["for"])] = make(cmd["entry"])
@@ -113,12 +114,12 @@ def bot_message(text, message_id=1):
     return NS(from_user=NS(id=BOT_ID), text=text, message_id=message_id)
 
 
-def make_callback(data, user_id=1, chat_id=None):
-    """Fake-Update eines Button-Klicks. Liefert (update, query)."""
-    query = NS(data=data, from_user=NS(id=user_id), answer=AsyncMock(), edit_message_text=AsyncMock())
+def make_callback(data, user_id=1, chat_id=None, chat_type="private", message=None):
+    """Fake-Update eines Button-Klicks. Liefert (update, query). message: die Nachricht, an der der Knopf hängt."""
+    query = NS(data=data, from_user=NS(id=user_id), answer=AsyncMock(), edit_message_text=AsyncMock(), message=message)
     update = NS(
         effective_user=NS(id=user_id, full_name="Test User", username="testuser"),
-        effective_chat=NS(id=chat_id if chat_id is not None else user_id, type="private", title=None),
+        effective_chat=NS(id=chat_id if chat_id is not None else user_id, type=chat_type, title=None),
         callback_query=query,
         message=None,
     )

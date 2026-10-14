@@ -1,7 +1,8 @@
 import unittest
 
-from bos_telegram_bot.core.template import (DEFAULT_TEMPLATE, html_problems, render, template_from_fields,
-                      validate_template)
+from bos_telegram_bot.core.template import (DEFAULT_TEMPLATE, MAX_TEMPLATE_LENGTH, SAMPLE_MATCHED, SAMPLE_PAYLOAD,
+                                            custom_template_problems, html_problems, render, template_from_fields,
+                                            unknown_placeholders, validate_template)
 
 # Multicast-Alarm in der Struktur, wie BOSWatch3 ihn liefert (alle Werte erfunden).
 MULTICAST = {
@@ -223,6 +224,117 @@ class ValidationTests(unittest.TestCase):
     def test_all_problems_are_reported_together(self):
         problems = validate_template("<div>{OFFEN\nAlarm & Einsatz")
         self.assertGreaterEqual(len(problems), 3)
+
+
+class SampleAlarmTests(unittest.TestCase):
+    """Der erfundene Alarm für die Vorschau von /template."""
+
+    def test_the_default_template_renders_like_a_real_alarm(self):
+        text = render(DEFAULT_TEMPLATE, SAMPLE_PAYLOAD, SAMPLE_MATCHED)
+        self.assertEqual(text, "🚨 <b>BOS-ALARM</b> 🚨\n\nWache Nord (Beispiel)\nFahrzeug 1 (Beispiel)\n"
+                               "THL 1 - Beispieltext, bitte nicht ernst nehmen\n\n<i>abonniert über: RIC: 1000011</i>")
+
+    def test_it_has_the_usual_fields_of_an_alarm_and_the_multicast_lists(self):
+        for key in ("ric", "message", "description", "subric", "subricText", "mode", "timestamp", "ric_list",
+                    "description_list", "timestamp_list", "multicastRecipientCount", "frequency", "clientName", "serverName"):
+            self.assertIn(key, SAMPLE_PAYLOAD)
+
+    def test_all_values_are_text_like_in_real_alarms(self):
+        self.assertTrue(all(isinstance(value, str) for value in SAMPLE_PAYLOAD.values()))
+
+    def test_the_values_that_look_like_addresses_come_from_the_ranges_reserved_for_examples(self):
+        self.assertEqual(SAMPLE_PAYLOAD["clientIP"], "192.0.2.10")                    # Adressbereich nur für Beispiele (RFC 5737)
+        self.assertEqual(SAMPLE_PAYLOAD["frequency"], "123.450M")
+
+    def test_the_matched_name_is_a_list_like_in_real_use(self):
+        self.assertEqual(SAMPLE_MATCHED, ["RIC: 1000011"])
+
+    def test_the_lists_of_the_sample_belong_together(self):
+        self.assertEqual(len(SAMPLE_PAYLOAD["ric_list"].split(", ")), len(SAMPLE_PAYLOAD["description_list"].split(", ")))
+
+
+class CustomTemplateTests(unittest.TestCase):
+    """Die Prüfung für ein Template, das ein User per /template setzen will."""
+
+    def test_the_default_template_is_valid(self):
+        self.assertEqual(custom_template_problems(DEFAULT_TEMPLATE), [])
+
+    def test_the_simplest_template_is_valid(self):
+        self.assertEqual(custom_template_problems("{MESSAGE}"), [])
+
+    def test_everything_the_start_check_refuses_is_refused_here_too(self):
+        for bad in ("", "   ", "<b>{MESSAGE}", "{MESSAGE} {", "<blink>{MESSAGE}</blink>", None, 5):
+            self.assertTrue(custom_template_problems(bad), repr(bad))
+
+    def test_without_a_placeholder_the_message_would_have_no_content(self):
+        (problem,) = custom_template_problems("Alarm!")
+        self.assertIn("enthält keinen Platzhalter", problem)
+
+    def test_a_literal_brace_pair_is_no_placeholder(self):
+        self.assertTrue(any("keinen Platzhalter" in p for p in custom_template_problems("{{MESSAGE}}")))
+
+    def test_a_placeholder_with_a_fallback_counts(self):
+        self.assertEqual(custom_template_problems("{DESCRIPTION_LIST|RIC_LIST}"), [])
+
+    def test_the_length_limit(self):
+        ok = "{MESSAGE}" + "x" * (MAX_TEMPLATE_LENGTH - len("{MESSAGE}"))
+        self.assertEqual(custom_template_problems(ok), [])
+        (problem,) = custom_template_problems(ok + "y")
+        self.assertIn(f"ist zu lang ({MAX_TEMPLATE_LENGTH + 1} Zeichen, erlaubt sind {MAX_TEMPLATE_LENGTH})", problem)
+
+    def test_the_limit_leaves_room_for_the_alarm_inside_telegrams_4096_characters(self):
+        self.assertLessEqual(MAX_TEMPLATE_LENGTH, 2000)
+
+    def test_several_problems_are_reported_together(self):
+        problems = custom_template_problems("<b>" + "x" * (MAX_TEMPLATE_LENGTH + 5))
+        self.assertGreaterEqual(len(problems), 3)                                    # nicht geschlossen, zu lang, kein Platzhalter
+
+    def test_an_empty_template_is_not_also_reported_as_having_no_placeholder(self):
+        self.assertEqual(custom_template_problems(""), ["ist leer"])
+
+
+class UnknownPlaceholderTests(unittest.TestCase):
+    def check(self, template, expected):
+        self.assertEqual(unknown_placeholders(template, SAMPLE_PAYLOAD), expected, template)
+
+    def test_known_placeholders_are_not_reported(self):
+        self.check("{MESSAGE} {RIC} {DESCRIPTION} {SUBRICTEXT} {FREQUENCY}", [])
+
+    def test_the_spelling_of_the_case_does_not_matter(self):
+        self.check("{message} {Subrictext} {SubricText}", [])
+
+    def test_lists_are_known_when_the_list_or_the_single_value_exists(self):
+        self.check("{RIC_LIST} {MESSAGE_LIST} {FREQUENCY_LIST}", [])                  # frequency_list fehlt, frequency gibt es
+
+    def test_matched_is_always_known(self):
+        self.check("{MATCHED}", [])
+
+    def test_a_typo_is_reported(self):
+        self.check("{MESSGAE} {RIC}", ["MESSGAE"])
+
+    def test_an_expression_with_a_fallback_is_known_if_any_alternative_is(self):
+        self.check("{GIBTSNICHT|MESSAGE}", [])
+        self.check("{GIBTSNICHT|AUCHNICHT}", ["GIBTSNICHT|AUCHNICHT"])
+
+    def test_every_unknown_one_is_reported_once_in_order(self):
+        self.check("{B} {A} {B} {MESSAGE} {A}", ["B", "A"])
+
+    def test_literal_braces_are_ignored(self):
+        self.check("{{KEIN_PLATZHALTER}} {MESSAGE}", [])
+
+    def test_a_list_suffix_alone_is_not_a_known_field(self):
+        self.check("{_LIST}", ["_LIST"])
+
+    def test_it_works_on_any_payload(self):
+        self.assertEqual(unknown_placeholders("{MESSAGE} {RIC}", {"message": "x"}), ["RIC"])
+
+    def test_a_template_without_placeholders_has_no_unknown_ones(self):
+        self.check("nur Text", [])
+
+    def test_an_unknown_one_stays_empty_in_the_rendering(self):
+        text = render("{MESSAGE} {GIBTSNICHT}", SAMPLE_PAYLOAD, SAMPLE_MATCHED)
+        self.assertNotIn("GIBTSNICHT", text)
+        self.assertEqual(text.strip(), SAMPLE_PAYLOAD["message"])                    # nur das Leerzeichen davor bleibt
 
 
 if __name__ == "__main__":

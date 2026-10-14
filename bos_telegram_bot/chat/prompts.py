@@ -20,8 +20,11 @@ PROMPT_HOW = "Einfach auf diese Nachricht antworten oder den Befehl direkt mit E
 MAX_OPEN_PROMPTS = 10  # pro Person gemerkte, noch unbeantwortete Rückfragen
 
 
-async def ask(update, context, text: str, placeholder: str, handler_key: tuple) -> None:
-    """Sendet Anleitung plus Rückfrage und merkt sich, welcher Befehl gemeint war."""
+async def ask(update, context, text: str, placeholder: str, handler_key: tuple, message=None) -> None:
+    """Sendet Anleitung plus Rückfrage und merkt sich, welcher Befehl gemeint war.
+
+    message: die Nachricht, auf die die Rückfrage antwortet. Standard ist die Nachricht des Befehls. Nach einem
+    Knopfdruck gibt es keine (update.message ist leer), dort wird sie angegeben."""
     chat = update.effective_chat
     in_group = chat.type != "private"
     options = {
@@ -32,7 +35,7 @@ async def ask(update, context, text: str, placeholder: str, handler_key: tuple) 
     }
     if in_group:
         options["do_quote"] = True
-    sent = await update.message.reply_text(text, **options)
+    sent = await (message or update.message).reply_text(text, **options)
 
     prompts = context.user_data.setdefault("prompts", {})
     prompts[(chat.id, sent.message_id)] = {"handler": handler_key}

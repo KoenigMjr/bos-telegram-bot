@@ -69,6 +69,35 @@ def build_notification_text(payload: dict, template: str, matched_aliases: list)
     return render(template, payload, matched_aliases)
 
 
+def _load_subscriptions_and_templates(db_path: str):
+    """Abos und eigene Templates in einem Rutsch (läuft im Thread). Die Templates sind nur eine Zugabe: Gibt es
+    Probleme damit, geht der Alarm trotzdem raus, dann mit dem Standard-Template."""
+    subs = db.get_all_subs(db_path)
+    try:
+        templates = db.get_chat_templates(db_path)
+    except Exception as error:
+        log.warning("Eigene Templates konnten nicht gelesen werden, es gilt überall der Standard (%s: %s)",
+                    type(error).__name__, error)
+        templates = {}
+    return subs, templates
+
+
+def _text_for_chat(chat_id, payload: dict, default_template: str, chat_template, aliases: list):
+    """(Text, Rückfalltext) für einen Chat. Hat der Chat ein eigenes Template, ist der Rückfalltext der Standardtext:
+    Lehnt Telegram die Formatierung des eigenen ab, geht der Alarm damit trotzdem raus."""
+    standard = build_notification_text(payload, default_template, aliases)
+    if not chat_template:
+        return standard, None
+    try:
+        own = build_notification_text(payload, chat_template, aliases)
+    except Exception as error:
+        log.warning("Chat %s: Das eigene Template lässt sich nicht anwenden, es gilt der Standard (%s: %s)",
+                    chat_id, type(error).__name__, error)
+        return standard, None
+    log.debug("Chat %s: eigenes Template", chat_id)
+    return (own, standard) if own != standard else (standard, None)
+
+
 class _AlarmDelivery:
     """Sammelt die Ergebnisse der Nachrichten eines Alarms und schreibt am Ende die Zusammenfassung.
 
@@ -119,7 +148,7 @@ async def handle_payload(db_path: str, active_fields: set, template: str, payloa
 
     # DB-Zugriff ist synchron (sqlite3) -> in Thread auslagern, damit der
     # Event-Loop bei jedem Alarm nicht blockiert.
-    subs = await asyncio.to_thread(db.get_all_subs, db_path)
+    subs, chat_templates = await asyncio.to_thread(_load_subscriptions_and_templates, db_path)
 
     # Pro Chat genau EINE Nachricht, auch wenn mehrere Abos desselben Chats
     # passen (z.B. Wache und Fahrzeug eines Multicast-Alarms).
@@ -166,12 +195,13 @@ async def handle_payload(db_path: str, active_fields: set, template: str, payloa
         log.debug("Alarm %s: Wiederholung, alle %d Chat(s) schon beliefert oder in Arbeit", label, len(matches))
         return
 
-    texts = {chat_id: build_notification_text(payload, template, aliases) for chat_id, aliases in pending.items()}
+    texts = {chat_id: _text_for_chat(chat_id, payload, template, chat_templates.get(chat_id), aliases)
+             for chat_id, aliases in pending.items()}
     delivery = _AlarmDelivery(label, key, delivered, sender, len(texts), matched_subs, is_new)
-    for chat_id, text in texts.items():
+    for chat_id, (text, fallback) in texts.items():
         log.debug("Nachricht an Chat %s: %s", chat_id, text)
         try:
-            sender.submit(chat_id, text, delivery.on_result)
+            sender.submit(chat_id, text, delivery.on_result, fallback=fallback)
         except Exception as error:                     # darf die übrigen Chats nicht um ihren Alarm bringen
             log.exception("Alarm %s: Einreihen für Chat %s fehlgeschlagen", label, chat_id)
             delivery.on_result(chat_id, False, str(error))

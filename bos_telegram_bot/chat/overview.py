@@ -30,6 +30,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("")
     lines.append("• <code>/abo</code> – Aktive Abonnements anzeigen &amp; verwalten")
     lines.append("• <code>/lastraw</code> – Letztes empfangenes Alarm-JSON anzeigen")
+    lines.append("• <code>/template</code> – Aussehen der Alarm-Nachricht für diesen Chat anpassen")
     if update.effective_chat.type != "private":
         lines.append("")
         lines.append("ℹ️ In dieser Gruppe gesetzte Abos gelten für alle Mitglieder dieser Gruppe.")

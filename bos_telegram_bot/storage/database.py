@@ -56,6 +56,17 @@ def init_db(db_path: str) -> None:
         )
         """
     )
+    # Eigene Alarm-Templates je Chat (Befehl /template). Ohne Eintrag gilt das Standard-Template.
+    c.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chat_templates (
+            chat_id INTEGER PRIMARY KEY,   -- wie bei den Abos: privater Chat (= User-ID) oder Gruppe
+            template TEXT NOT NULL,
+            updated_by INTEGER,            -- wer es zuletzt geändert hat
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -209,3 +220,46 @@ def get_learned(db_path: str, for_field: str, for_value: str):
     ).fetchone()
     conn.close()
     return row["add_value"] if row else None
+
+
+# ---------------------------------------------------------------- Templates je Chat
+
+def set_chat_template(db_path: str, chat_id: int, template: str, user_id: int = None) -> None:
+    conn = get_connection(db_path)
+    conn.execute(
+        """
+        INSERT INTO chat_templates (chat_id, template, updated_by) VALUES (?, ?, ?)
+        ON CONFLICT(chat_id) DO UPDATE SET
+            template = excluded.template,
+            updated_by = excluded.updated_by,
+            updated_at = CURRENT_TIMESTAMP
+        """,
+        (chat_id, template, user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_chat_template(db_path: str, chat_id: int):
+    """Das eigene Template eines Chats oder None."""
+    conn = get_connection(db_path)
+    row = conn.execute("SELECT template FROM chat_templates WHERE chat_id = ?", (chat_id,)).fetchone()
+    conn.close()
+    return row["template"] if row else None
+
+
+def delete_chat_template(db_path: str, chat_id: int) -> bool:
+    """Entfernt das eigene Template, der Chat nutzt danach wieder den Standard. True, wenn eines da war."""
+    conn = get_connection(db_path)
+    cursor = conn.execute("DELETE FROM chat_templates WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
+    return cursor.rowcount > 0
+
+
+def get_chat_templates(db_path: str) -> dict:
+    """Alle eigenen Templates auf einmal: {chat_id: template}. So braucht ein Alarm nur eine Abfrage."""
+    conn = get_connection(db_path)
+    rows = conn.execute("SELECT chat_id, template FROM chat_templates").fetchall()
+    conn.close()
+    return {row["chat_id"]: row["template"] for row in rows}

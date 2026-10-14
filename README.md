@@ -59,6 +59,7 @@ vorher einrichten.
 | `/subrictext <Wert>`           | Sub-RIC (a bis d)                                                |
 | `/abo`                         | Abos anzeigen und per Klick entfernen                            |
 | `/lastraw`                     | zuletzt empfangenes Alarm-JSON anzeigen                          |
+| `/template`                    | Aussehen der Alarm-Nachricht für diesen Chat ändern, siehe [Nachricht anpassen](#das-aussehen-per-befehl-ändern-template) |
 | `/users`, `/adduser <ID>`      | nur Admins, siehe [Benutzer und Admins](#benutzer-und-admins)    |
 
 ### Befehl ohne Eingabe: der Bot fragt nach
@@ -278,6 +279,11 @@ Wie Einträge zusammengeführt werden:
   Wert für Wert überlagert, `notification_fields:` ersetzt die Liste komplett (die Nachricht selbst stellst du mit
   `notification.template` ein, siehe [Nachricht anpassen](#nachricht-anpassen)).
 
+**Befehlsnamen sind nicht frei:** `start`, `abo`, `lastraw`, `template`, `users` und `adduser` gehören dem Bot.
+Heißt ein Feld so (oder zwei Felder ergeben denselben Befehl), bricht der Start mit der Meldung
+"Befehlsname-Kollision" ab. Gib dem Feld dann mit `command:` einen anderen Namen, z.B.
+`- for: template` mit `command: vorlage`.
+
 Eine Vorlage mit Kommentaren liegt in
 [`examples/config.override.example.yaml`](examples/config.override.example.yaml),
 alle Optionen stehen in der mitgelieferten [`config.yaml`](config.yaml).
@@ -376,6 +382,30 @@ Alarm, entfällt die Zeile. Welche Felder es gibt, zeigt `/lastraw`.
 Die ältere Einstellung `notification_fields: [description, message, ric]` (je Feld eine Zeile) gilt weiter,
 `notification.template` hat aber Vorrang. Namen, die selbst ein `, ` enthalten, zeigt die Nachricht auf
 zwei Zeilen, weil BOSWatch3 seine Listen mit demselben Trennzeichen bildet.
+
+### Das Aussehen per Befehl ändern: `/template`
+
+Jeder freigeschaltete User kann die Vorlage **für seinen eigenen Chat** ändern, jede Gruppe hat ihre eigene
+(in einer Gruppe darf jedes freigeschaltete Mitglied sie ändern). Wer nichts einstellt, bekommt die Vorlage aus der
+Konfiguration. Ein Neustart ist nicht nötig, die Änderung gilt für den nächsten Alarm.
+
+1. `/template` zeigt die aktuelle Vorlage als **Kopierblock** und öffnet das Antwortfeld. Telegram erlaubt Bots
+   nicht, das Eingabefeld vorzubefüllen. Ein Tipp auf den Block kopiert ihn.
+2. Einfügen, anpassen und als **Antwort auf diese Nachricht** senden. Die Platzhalter sind dieselben wie oben,
+   die HTML-Tags schreibst du als normalen Text, z.B. `<b>{MESSAGE}</b>`. Zeilenumbrüche bleiben erhalten.
+   Alternativ geht alles in einer Nachricht: `/template <b>{MESSAGE}</b>`.
+3. Der Bot prüft den Text und zeigt eine **Vorschau mit einem erfundenen Beispiel-Alarm** (nie mit einem echten,
+   der könnte eine Wache betreffen, die der Chat nicht abonniert hat). Platzhalter, die es nicht gibt, bleiben leer, darauf
+   weist er hin.
+4. **✅ Übernehmen** speichert, **✏️ Ändern** öffnet den Entwurf erneut, **✖️ Verwerfen** lässt alles, wie es war.
+   Übernehmen kann nur, wer die Änderung vorgeschlagen hat. Eine Vorschau gilt 30 Minuten.
+
+`/template standard` stellt nach Bestätigung wieder die Vorlage aus der Konfiguration her.
+
+Die Vorlage muss mindestens einen Platzhalter enthalten, darf höchstens 1500 Zeichen lang sein und nur die
+von Telegram erlaubten Tags nutzen. Lehnt Telegram eine Nachricht beim echten Alarm trotzdem wegen der Formatierung ab,
+geht der Alarm **mit der Standard-Vorlage** raus, statt verloren zu gehen (im Log eine Warnung). Kann der Bot die
+eigenen Vorlagen nicht lesen, gilt überall die Standard-Vorlage. Jede Änderung steht mit Chat und User im INFO-Log.
 
 ## Multicast-Alarme
 
@@ -661,7 +691,7 @@ Alles, was der Bot sich merkt, liegt im Datenordner (Standard
 
 | Datei               | Inhalt                                                     |
 |---------------------|--------------------------------------------------------------|
-| `bot_db.sqlite3`    | Abos aller Chats, freigeschaltete User und Anfragen, gelernte Namen |
+| `bot_db.sqlite3`    | Abos und eigene Vorlagen aller Chats, freigeschaltete User und Anfragen, gelernte Namen |
 | `config.yaml`       | deine Anpassungen (nur falls du eine angelegt hast)          |
 | `*.csv`             | deine Namenslisten (nur falls du sie hier abgelegt hast)     |
 

@@ -358,6 +358,115 @@ class PermanentErrorTests(SenderCase):
         self.assertEqual(self.offsets(11), [0.0, 1.0])
 
 
+class FallbackTextTests(SenderCase):
+    """Lehnt Telegram die Formatierung eines eigenen Templates ab, geht der Alarm mit dem Standardtext raus."""
+    REJECT = BadRequest("Can't parse entities: Unsupported start tag \"x\" at byte offset 3")
+
+    def submit_with_fallback(self, chat=11, text="EIGEN", fallback="STANDARD"):
+        self.sender.submit(chat, text, lambda c, ok, why: self.results.append((c, text, ok, why)), fallback=fallback)
+
+    async def test_when_telegram_rejects_the_formatting_the_default_text_goes_out_instead(self):
+        self.make(script={11: [self.REJECT]})
+        self.submit_with_fallback()
+        with self.assertLogs(LOGGER, level="WARNING") as logged:
+            await self.drive()
+        self.assertEqual(self.bot.texts(11), ["EIGEN", "STANDARD"])
+        self.assertEqual(self.results, [(11, "EIGEN", True, None)])                   # der Alarm gilt als zugestellt
+        self.assertIn("Telegram lehnt die Formatierung des eigenen Templates ab", logged.output[0])
+        self.assertIn("Der Alarm geht mit dem Standard-Template raus", logged.output[0])
+
+    async def test_the_rejected_attempt_does_not_count_as_an_attempt(self):
+        self.make(script={11: [self.REJECT, TimedOut(), TimedOut()]}, attempts=3)
+        self.submit_with_fallback()
+        with self.assertLogs(LOGGER, level="WARNING"):
+            await self.drive()
+        self.assertEqual(len(self.bot.calls), 4)                                       # Ablehnung + drei volle Versuche
+        self.assertEqual(self.results[0][2], True)
+
+    async def test_it_also_works_with_a_single_attempt(self):
+        self.make(script={11: [self.REJECT]}, attempts=1)
+        self.submit_with_fallback()
+        with self.assertLogs(LOGGER, level="WARNING"):
+            await self.drive()
+        self.assertEqual(self.bot.texts(11), ["EIGEN", "STANDARD"])
+        self.assertEqual(self.results[0][2], True)
+
+    async def test_an_empty_message_is_treated_like_a_formatting_problem(self):
+        self.make(script={11: [BadRequest("Message text is empty")]})
+        self.submit_with_fallback()
+        with self.assertLogs(LOGGER, level="WARNING"):
+            await self.drive()
+        self.assertEqual(self.bot.texts(11), ["EIGEN", "STANDARD"])
+
+    async def test_the_fallback_is_used_only_once(self):
+        self.make(script={11: [self.REJECT, self.REJECT]})
+        self.submit_with_fallback()
+        with self.assertLogs(LOGGER, level="ERROR") as logged:
+            await self.drive()
+        self.assertEqual(self.bot.texts(11), ["EIGEN", "STANDARD"])                    # kein dritter Versuch
+        self.assertEqual(self.results[0][2], False)                                    # jetzt ist es ein echter Fehler
+        self.assertIn("nicht möglich", logged.output[-1])
+
+    async def test_without_a_fallback_a_rejected_formatting_is_a_permanent_failure_as_before(self):
+        self.make(script={11: [self.REJECT]})
+        self.sender.submit(11, "EIGEN", lambda c, ok, why: self.results.append((c, ok, why)))
+        with self.assertLogs(LOGGER, level="ERROR"):
+            await self.drive()
+        self.assertEqual(self.bot.texts(11), ["EIGEN"])
+        self.assertEqual(self.results[0][1], False)
+
+    async def test_other_bad_requests_do_not_trigger_the_fallback(self):
+        self.make(script={11: [BadRequest("Chat not found")]})
+        self.submit_with_fallback()
+        with self.assertLogs(LOGGER, level="ERROR"):
+            await self.drive()
+        self.assertEqual(self.bot.texts(11), ["EIGEN"])
+        self.assertEqual(self.results[0][2], False)
+
+    async def test_other_errors_do_not_trigger_the_fallback(self):
+        self.make(script={11: [TimedOut(), None]})
+        self.submit_with_fallback()
+        with self.assertLogs(LOGGER, level="WARNING"):
+            await self.drive()
+        self.assertEqual(self.bot.texts(11), ["EIGEN", "EIGEN"])                       # derselbe Text noch einmal
+
+    async def test_a_message_without_problems_never_uses_the_fallback(self):
+        self.make()
+        self.submit_with_fallback()
+        await self.drive()
+        self.assertEqual(self.bot.texts(11), ["EIGEN"])
+
+    async def test_the_fallback_belongs_to_its_message_only(self):
+        self.make(script={11: [self.REJECT]})
+        self.submit_with_fallback(11, "EIGEN-11", "STANDARD-11")
+        self.submit_with_fallback(22, "EIGEN-22", "STANDARD-22")
+        with self.assertLogs(LOGGER, level="WARNING"):
+            await self.drive()
+        self.assertEqual(self.bot.texts(11), ["EIGEN-11", "STANDARD-11"])
+        self.assertEqual(self.bot.texts(22), ["EIGEN-22"])
+
+    async def test_the_fallback_is_still_spaced_like_every_other_send(self):
+        self.make(script={11: [self.REJECT]})
+        self.submit_with_fallback()
+        with self.assertLogs(LOGGER, level="WARNING"):
+            await self.drive()
+        self.assertEqual(self.offsets(11), [0.0, 1.0])
+
+    async def test_the_message_after_the_fallback_is_unaffected(self):
+        self.make(script={11: [self.REJECT]})
+        self.submit_with_fallback(11, "EIGEN", "STANDARD")
+        self.submit(11, "NÄCHSTE")
+        with self.assertLogs(LOGGER, level="WARNING"):
+            await self.drive()
+        self.assertEqual(self.bot.texts(11), ["EIGEN", "STANDARD", "NÄCHSTE"])
+
+    async def test_the_detection_looks_at_the_text_of_the_error_in_any_case(self):
+        from bos_telegram_bot.chat.sender import _rejects_formatting
+        self.assertTrue(_rejects_formatting(BadRequest("CAN'T PARSE ENTITIES")))
+        self.assertFalse(_rejects_formatting(BadRequest("Chat not found")))
+        self.assertFalse(_rejects_formatting(RuntimeError("can't parse entities")))     # nur BadRequest zählt
+
+
 class QueueLimitTests(SenderCase):
     async def fill(self, max_queue):
         """Chat 1 hängt mit einer Nachricht 'in Arbeit', danach wartet nichts."""
